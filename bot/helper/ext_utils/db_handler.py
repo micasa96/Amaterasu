@@ -118,6 +118,42 @@ class DbManager:
             self._conn.close()
         self._conn = None
 
+    # Phase 6.9 — External qBittorrent leeched-hash store.
+    # Tracks which torrent hashes have already been uploaded to Telegram so
+    # the auto-watch loop only acts on NEW completed torrents. Persisted in
+    # Mongo (survives bot restarts) under qb_external_leeched[bot_id].
+    async def get_qb_external_leeched(self):
+        if self._return or self.db is None:
+            return set()
+        try:
+            doc = await self.db.qb_external_leeched.find_one({"_id": _bot_id()})
+            return set(doc.get("hashes", [])) if doc else set()
+        except PyMongoError as e:
+            LOGGER.warning(f"get_qb_external_leeched: {e}")
+            return set()
+
+    async def add_qb_external_leeched(self, hashes):
+        if self._return or self.db is None:
+            return
+        if not hashes:
+            return
+        try:
+            await self.db.qb_external_leeched.update_one(
+                {"_id": _bot_id()},
+                {"$addToSet": {"hashes": {"$each": list(hashes)}}},
+                upsert=True,
+            )
+        except PyMongoError as e:
+            LOGGER.warning(f"add_qb_external_leeched: {e}")
+
+    async def reset_qb_external_leeched(self):
+        if self._return or self.db is None:
+            return
+        try:
+            await self.db.qb_external_leeched.delete_one({"_id": _bot_id()})
+        except PyMongoError as e:
+            LOGGER.warning(f"reset_qb_external_leeched: {e}")
+
     async def migrate_from_wzmlx(self):
         """One-time migration from WZML-X (wzmlx db) to Amaterasu (amaterasu db).
 

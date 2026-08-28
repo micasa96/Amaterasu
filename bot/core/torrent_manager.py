@@ -60,7 +60,7 @@ async def _connect_aria2(retries=30, delay=2):
 
 
 async def _connect_qbittorrent(retries=30, delay=2):
-    base_url = "http://localhost:8090/api/v2/"
+    base_url = f"{Config.QB_HOST.rstrip('/')}/api/v2/"
     last_error = None
     warn_after = min(10, retries - 1)
     for i in range(retries):
@@ -99,9 +99,14 @@ class TorrentManager:
     async def _auth_qbit(cls):
         if cls.qbittorrent is None:
             return False
-        pwd = _qbit_password()
+        if Config.USE_EXTERNAL_QBITTORRENT:
+            user = Config.QB_USER or "admin"
+            pwd = Config.QB_PASS or ""
+        else:
+            user = "admin"
+            pwd = _qbit_password()
         try:
-            await cls.qbittorrent.auth.login("admin", pwd)
+            await cls.qbittorrent.auth.login(user, pwd)
             return True
         except Exception:
             return False
@@ -118,12 +123,18 @@ class TorrentManager:
                 LOGGER.info("Torrents are disabled.")
                 return
 
-            qbit_profile = ensure_qbittorrent_runtime_profile()
-            cls._qbit_process = await create_subprocess_exec(
-                BinConfig.QBIT_NAME, "-d", f"--profile={qbit_profile}"
-            )
-            await sleep(2)
-            LOGGER.info("qBittorrent started !")
+            if Config.USE_EXTERNAL_QBITTORRENT:
+                LOGGER.info(
+                    "Using EXTERNAL qBittorrent at %s (not launching a local instance).",
+                    Config.QB_HOST,
+                )
+            else:
+                qbit_profile = ensure_qbittorrent_runtime_profile()
+                cls._qbit_process = await create_subprocess_exec(
+                    BinConfig.QBIT_NAME, "-d", f"--profile={qbit_profile}"
+                )
+                await sleep(2)
+                LOGGER.info("qBittorrent started !")
 
             cls.qbittorrent = await _connect_qbittorrent()
             cls.qbittorrent = wrap_with_retry(cls.qbittorrent)
@@ -162,6 +173,25 @@ class TorrentManager:
     async def _start_qbit(cls):
         if Config.DISABLE_TORRENTS:
             return False
+        if Config.USE_EXTERNAL_QBITTORRENT:
+            # External instance: never spawn a local qBittorrent. Just
+            # (re)connect to the configured host.
+            LOGGER.info("Reconnecting to EXTERNAL qBittorrent at %s", Config.QB_HOST)
+            try:
+                if cls.qbittorrent:
+                    try:
+                        await cls.qbittorrent.close()
+                    except Exception:
+                        pass
+                    cls.qbittorrent = None
+                cls.qbittorrent = await _connect_qbittorrent()
+                cls.qbittorrent = wrap_with_retry(cls.qbittorrent)
+                await cls._auth_qbit()
+                LOGGER.info("External qBittorrent reconnected successfully")
+                return True
+            except Exception as e:
+                LOGGER.error(f"Failed to reconnect external qBittorrent: {e}")
+                return False
         now = time()
         if now - cls._last_qbit_restart < cls._restart_debounce:
             return False

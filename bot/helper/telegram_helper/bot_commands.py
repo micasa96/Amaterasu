@@ -64,6 +64,9 @@ class BotCommands:
         "Telegraph": ["tg", "telegraph"],
         "FileToLink": ["link", "stream", "f2l"],
         "AutoRename": ["autorename", "ar"],
+        "QbExternal": ["qbexternal", "qbx"],
+        "LeechHash": ["leechhash", "lhash"],
+        "QbAutoWatch": ["qbautowatch", "qbaw"],
         "Sort": "sort",
         "Setup": ["setup", "init"],  # Phase 5.8 — interactive setup wizard
     }

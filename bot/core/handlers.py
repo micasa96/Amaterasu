@@ -399,6 +399,11 @@ async def add_handlers():
         CallbackQueryHandler(pics_callback, filters=regex("^images"))
     )
 
+    # Phase 6.9 — External qBittorrent handlers (leechhash / qbautowatch).
+    from ..modules.qb_external import register_qb_external_handlers
+
+    register_qb_external_handlers()
+
     # Phase 1.6 — image search callback handler (imgsearch prefix)
     from ..modules.images import image_search_callback
     TgClient.bot.add_handler(

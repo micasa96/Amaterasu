@@ -127,6 +127,23 @@ QUEUE_DOWNLOAD = 0
 QUEUE_UPLOAD = 0
 
 # ==========================================
+# 8b. EXTERNAL QBITTORRENT (connect to YOUR pre-existing qBittorrent)
+# ==========================================
+# Set True to make Amaterasu use an ALREADY-RUNNING qBittorrent instead of
+# launching its own bundled instance. Point QB_HOST at the WebUI base URL
+# (no trailing slash) and supply your real WebUI credentials. The bot will
+# NOT spawn, stop, or delete torrents in this qBittorrent.
+USE_EXTERNAL_QBITTORRENT = False
+QB_HOST = "http://localhost:8090"
+QB_USER = "admin"
+QB_PASS = ""
+# Auto-upload newly-completed torrents to Telegram (ignores hashes already
+# recorded in MongoDB so it only acts on NEW torrents). Toggle at runtime
+# with /qbautowatch on|off. /leechhash always uploads (force, ignores store).
+QB_EXTERNAL_AUTOWATCH = False
+QB_EXTERNAL_AUTOWATCH_INTERVAL = 300  # seconds between scans
+
+# ==========================================
 # 9. JDOWNLOADER & SABNZBD
 # ==========================================
 JD_EMAIL = ""

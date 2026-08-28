@@ -200,17 +200,25 @@ async def main():
     # persistence. Watches /data/tunnel_url.txt and propagates new URLs
     # to Config.BASE_URL, MongoDB, and owner DM.
     from .helper.ext_utils.tunnel_monitor import start_tunnel_monitor
+
     create_tracked_task(start_tunnel_monitor())
     # Phase 2.9 — start engine health checker. Checks aria2, qbit,
     # SABnzbd, JDownloader every 5 minutes. Notifies owner on
     # HEALTHY → UNAVAILABLE and UNAVAILABLE → HEALTHY transitions.
     from .helper.ext_utils.engine_health import start_engine_health_checker
+
     create_tracked_task(start_engine_health_checker())
     # Phase 3.1 — detect FFmpeg hardware acceleration at startup so the
     # first encode doesn't pay the probe cost. Logs the detected encoder.
     from .helper.ext_utils.hwaccel import init_hwaccel_detection
+
     create_tracked_task(init_hwaccel_detection())
 
+    # Phase 6.9 — start external qBittorrent auto-watch loop if enabled.
+    if Config.USE_EXTERNAL_QBITTORRENT and Config.QB_EXTERNAL_AUTOWATCH:
+        from .modules.qb_external import maybe_start_autowatch
+
+        create_tracked_task(maybe_start_autowatch())
     from .core.auto_restart import schedule_auto_restart
 
     schedule_auto_restart()
@@ -379,6 +387,14 @@ async def _graceful_shutdown():
                     LOGGER.debug("Unable to cancel status interval: %s", error)
     except Exception as e:
         LOGGER.error(f"Shutdown: interval cancel error: {e}")
+
+    LOGGER.info("Shutdown: stopping external qBittorrent auto-watch...")
+    try:
+        from .modules.qb_external import stop_autowatch
+
+        await stop_autowatch()
+    except Exception as e:
+        LOGGER.error(f"Shutdown: autowatch stop error: {e}")
 
     LOGGER.info("Shutdown: persisting Config to MongoDB...")
     try:

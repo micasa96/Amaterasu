@@ -72,6 +72,21 @@ class Config:
     DEBRID_LINK_API = ""
     DISABLE_TORRENTS = False
     DISABLE_LEECH = False
+
+    # Phase 6.9 — External qBittorrent support.
+    # When True, Amaterasu connects to an ALREADY-RUNNING qBittorrent
+    # (e.g. one the operator managed before installing the bot) instead of
+    # launching its own bundled instance. Point QB_HOST at the WebUI base
+    # URL and supply the real QB_USER/QB_PASS credentials. The bot will
+    # NOT spawn or stop your qBittorrent process.
+    USE_EXTERNAL_QBITTORRENT = bool(False)
+    QB_HOST = "http://localhost:8090"
+    QB_USER = "admin"
+    QB_PASS = ""
+    # When True, the auto-watch loop uploads newly-completed torrents to
+    # Telegram automatically (ignoring hashes already recorded in Mongo).
+    QB_EXTERNAL_AUTOWATCH = bool(False)
+    QB_EXTERNAL_AUTOWATCH_INTERVAL = 300
     DISABLE_BULK = False
     DISABLE_MULTI = False
     DISABLE_SEED = False
