@@ -25,6 +25,8 @@ class _Cancelled(Exception):
 
 
 def normalize_patterns(patterns):
+    if isinstance(patterns, str):
+        patterns = [patterns]
     normalized = []
     for pattern in patterns or ():
         text = str(pattern).strip().casefold()
@@ -279,6 +281,13 @@ async def clean_subtitles(listener, path, patterns):
                 if separator == ",":
                     raise
         os.replace(output, path)
+        LOGGER.info(
+            "Subtitle cleanup applied: %s | rewritten=%d dropped=%d title=%s",
+            os.path.basename(path),
+            len(cleaned),
+            len(dropped),
+            "cleaned" if title_changed else "unchanged",
+        )
     except _Cancelled:
         return path
     except Exception:

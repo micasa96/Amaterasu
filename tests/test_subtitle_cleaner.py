@@ -33,6 +33,7 @@ def test_normalize_patterns_is_case_insensitive_and_deduplicated():
     assert normalize_patterns([" Sitiospam.com ", "sitiospam.com", "", None]) == [
         "sitiospam.com"
     ]
+    assert normalize_patterns("sitiospam.com") == ["sitiospam.com"]
 
 
 def test_clean_title_removes_matching_fragment_and_keeps_the_rest():
