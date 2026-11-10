@@ -61,49 +61,6 @@ _LANGUAGE_NAMES = {
     "glg": "Gallego",
 }
 
-_CODEC_NAMES = {
-    "eac3": "E-AC-3",
-    "ac3": "AC-3",
-    "aac": "AAC",
-    "mp3": "MP3",
-    "opus": "Opus",
-    "vorbis": "Vorbis",
-    "flac": "FLAC",
-    "alac": "ALAC",
-    "dts": "DTS",
-    "truehd": "TrueHD",
-    "mlp": "MLP",
-    "wma": "WMA",
-    "pcm_s16le": "PCM",
-    "pcm_s24le": "PCM",
-    "pcm_s32le": "PCM",
-    "pcm_f32le": "PCM",
-}
-
-_CHANNEL_NAMES = {
-    "mono": "1.0",
-    "stereo": "2.0",
-    "quad": "4.0",
-    "2.1": "2.1",
-    "3.0": "3.0",
-    "4.0": "4.0",
-    "5.0": "5.0",
-    "5.1": "5.1",
-    "6.1": "6.1",
-    "7.1": "7.1",
-}
-
-_CHANNEL_NAMES_BY_COUNT = {
-    1: "1.0",
-    2: "2.0",
-    3: "2.1",
-    4: "4.0",
-    5: "5.0",
-    6: "5.1",
-    7: "6.1",
-    8: "7.1",
-}
-
 
 class _Cancelled(Exception):
     """Raised internally when the owning task is cancelled mid-cleanup."""
@@ -158,34 +115,11 @@ def _tag(tags, name):
     return ""
 
 
-def _channel_label(stream):
-    layout = re.sub(
-        r"\s*\(.*\)$", "", str(stream.get("channel_layout") or "").strip()
-    ).casefold()
-    if layout in _CHANNEL_NAMES:
-        return _CHANNEL_NAMES[layout]
-    if re.fullmatch(r"\d+(?:\.\d+)?", layout):
-        return layout
-    try:
-        channels = int(stream.get("channels"))
-    except (TypeError, ValueError):
-        channels = 0
-    if channels in _CHANNEL_NAMES_BY_COUNT:
-        return _CHANNEL_NAMES_BY_COUNT[channels]
-    return f"{channels}ch" if channels else ""
-
-
 def _audio_label(stream):
     language = str(_tag(stream.get("tags"), "language") or "").strip().casefold()
     if language and language != "und":
-        name = _LANGUAGE_NAMES.get(language, language.upper())
-    else:
-        name = "Audio"
-    codec = str(stream.get("codec_name") or "").casefold()
-    codec_name = _CODEC_NAMES.get(codec, codec.upper())
-    channels = _channel_label(stream)
-    details = " ".join(part for part in (codec_name, channels) if part)
-    return f"{name} ({details})" if details else name
+        return _LANGUAGE_NAMES.get(language, language.upper())
+    return "Audio"
 
 
 def _output_subtitle_codec(suffix, stream):

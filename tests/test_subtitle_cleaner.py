@@ -77,22 +77,13 @@ www.sitiospam.com
     assert filter_subtitle_text(single, "subrip", ["sitiospam.com"]) is None
 
 
-def test_audio_label_uses_language_codec_and_channels():
-    spa = {
-        "codec_name": "eac3",
-        "channels": 6,
-        "channel_layout": "5.1(side)",
-        "tags": {"language": "spa"},
-    }
-    eng = {
-        "codec_name": "eac3",
-        "channels": 6,
-        "channel_layout": "5.1(side)",
-        "tags": {"language": "eng"},
-    }
+def test_audio_label_uses_track_language():
+    spa = {"codec_name": "eac3", "tags": {"language": "spa"}}
+    eng = {"codec_name": "eac3", "tags": {"language": "eng"}}
 
-    assert _audio_label(spa) == "Español Latino Americano (E-AC-3 5.1)"
-    assert _audio_label(eng) == "Inglés (E-AC-3 5.1)"
+    assert _audio_label(spa) == "Español Latino Americano"
+    assert _audio_label(eng) == "Inglés"
+    assert _audio_label({"tags": {}}) == "Audio"
 
 
 def test_remux_command_clears_matching_global_title():
