@@ -1,4 +1,4 @@
-"""Strip known spam text from text subtitle tracks without re-encoding A/V."""
+"""Strip known spam from subtitle cues and track titles without re-encoding A/V."""
 
 import asyncio
 import json
@@ -18,6 +18,91 @@ _TEXT_CODECS = {"subrip", "ass", "ssa", "mov_text", "webvtt"}
 _FILTERED_SUFFIXES = {".mkv", ".mp4", ".m4v", ".mov"}
 _MP4_SUFFIXES = {".mp4", ".m4v", ".mov"}
 _ASS_CODECS = {"ass", "ssa"}
+
+_LANGUAGE_NAMES = {
+    "spa": "Español Latino Americano",
+    "eng": "Inglés",
+    "por": "Portugués",
+    "fra": "Francés",
+    "fre": "Francés",
+    "deu": "Alemán",
+    "ger": "Alemán",
+    "ita": "Italiano",
+    "jpn": "Japonés",
+    "kor": "Coreano",
+    "zho": "Chino",
+    "chi": "Chino",
+    "rus": "Ruso",
+    "ara": "Árabe",
+    "hin": "Hindi",
+    "tur": "Turco",
+    "pol": "Polaco",
+    "nld": "Neerlandés",
+    "dut": "Neerlandés",
+    "swe": "Sueco",
+    "nor": "Noruego",
+    "dan": "Danés",
+    "fin": "Finés",
+    "ces": "Checo",
+    "cze": "Checo",
+    "ell": "Griego",
+    "gre": "Griego",
+    "heb": "Hebreo",
+    "tha": "Tailandés",
+    "vie": "Vietnamita",
+    "ind": "Indonesio",
+    "ukr": "Ucraniano",
+    "ron": "Rumano",
+    "rum": "Rumano",
+    "hun": "Húngaro",
+    "cat": "Catalán",
+    "eus": "Vasco",
+    "baq": "Vasco",
+    "glg": "Gallego",
+}
+
+_CODEC_NAMES = {
+    "eac3": "E-AC-3",
+    "ac3": "AC-3",
+    "aac": "AAC",
+    "mp3": "MP3",
+    "opus": "Opus",
+    "vorbis": "Vorbis",
+    "flac": "FLAC",
+    "alac": "ALAC",
+    "dts": "DTS",
+    "truehd": "TrueHD",
+    "mlp": "MLP",
+    "wma": "WMA",
+    "pcm_s16le": "PCM",
+    "pcm_s24le": "PCM",
+    "pcm_s32le": "PCM",
+    "pcm_f32le": "PCM",
+}
+
+_CHANNEL_NAMES = {
+    "mono": "1.0",
+    "stereo": "2.0",
+    "quad": "4.0",
+    "2.1": "2.1",
+    "3.0": "3.0",
+    "4.0": "4.0",
+    "5.0": "5.0",
+    "5.1": "5.1",
+    "6.1": "6.1",
+    "7.1": "7.1",
+}
+
+_CHANNEL_NAMES_BY_COUNT = {
+    1: "1.0",
+    2: "2.0",
+    3: "2.1",
+    4: "4.0",
+    5: "5.0",
+    6: "5.1",
+    7: "6.1",
+    8: "7.1",
+}
 
 
 class _Cancelled(Exception):
@@ -40,6 +125,7 @@ def clean_title(title, patterns):
     for pattern in patterns:
         cleaned = re.sub(re.escape(pattern), "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"[\[\(\{]\s*[\]\)\}]", "", cleaned)
+    cleaned = re.sub(r"\bwww\.?\s*", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\s{2,}", " ", cleaned)
     return re.sub(r"^[\s\-–—_|,:;./\\]+|[\s\-–—_|,:;./\\]+$", "", cleaned)
 
@@ -70,6 +156,36 @@ def _tag(tags, name):
         if key.casefold() == name:
             return value
     return ""
+
+
+def _channel_label(stream):
+    layout = re.sub(
+        r"\s*\(.*\)$", "", str(stream.get("channel_layout") or "").strip()
+    ).casefold()
+    if layout in _CHANNEL_NAMES:
+        return _CHANNEL_NAMES[layout]
+    if re.fullmatch(r"\d+(?:\.\d+)?", layout):
+        return layout
+    try:
+        channels = int(stream.get("channels"))
+    except (TypeError, ValueError):
+        channels = 0
+    if channels in _CHANNEL_NAMES_BY_COUNT:
+        return _CHANNEL_NAMES_BY_COUNT[channels]
+    return f"{channels}ch" if channels else ""
+
+
+def _audio_label(stream):
+    language = str(_tag(stream.get("tags"), "language") or "").strip().casefold()
+    if language and language != "und":
+        name = _LANGUAGE_NAMES.get(language, language.upper())
+    else:
+        name = "Audio"
+    codec = str(stream.get("codec_name") or "").casefold()
+    codec_name = _CODEC_NAMES.get(codec, codec.upper())
+    channels = _channel_label(stream)
+    details = " ".join(part for part in (codec_name, channels) if part)
+    return f"{name} ({details})" if details else name
 
 
 def _output_subtitle_codec(suffix, stream):
@@ -121,7 +237,10 @@ async def _run(arguments, listener, timeout):
 
 async def _probe(path, listener):
     output = await _run(
-        ["ffprobe", "-v", "error", "-show_streams", "-of", "json", path],
+        [
+            "ffprobe", "-v", "error", "-show_streams", "-show_format",
+            "-of", "json", path,
+        ],
         listener,
         120,
     )
@@ -142,7 +261,7 @@ async def _extract_track(ffmpeg, path, stream, target, listener):
 
 def _build_remux_command(
     ffmpeg, path, suffix, streams, subtitles, cleaned, dropped, patterns, output,
-    separator,
+    separator, global_title="",
 ):
     command = [
         ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i", path,
@@ -155,52 +274,63 @@ def _build_remux_command(
         command += ["-i", target]
         positions[stream["index"]] = len(positions) + 1
     command += ["-map_chapters", "0"]
+    mapped = []
+    counters = {"video": 0, "audio": 0, "subtitle": 0, "data": 0}
     for stream in streams:
-        if stream.get("codec_type") == "attachment":
+        kind = stream.get("codec_type")
+        if kind == "attachment":
             continue
         index = stream.get("index")
-        if stream.get("codec_type") == "subtitle":
+        if kind == "subtitle":
             if index in dropped:
                 continue
-            command += ["-map", f"{positions[index]}:0" if index in positions else f"0:{index}"]
+            command += [
+                "-map", f"{positions[index]}:0" if index in positions else f"0:{index}",
+            ]
         else:
             command += ["-map", f"0:{index}"]
+        number = counters.get(kind)
+        if number is not None:
+            counters[kind] = number + 1
+        mapped.append((stream, kind, number, index in positions))
     if suffix == ".mkv":
         command += ["-map", "0:t?"]
     command += ["-c", "copy"]
-    subtitle_index = 0
-    for stream in subtitles:
-        if stream["index"] in dropped:
+    for stream, kind, number, is_cleaned in mapped:
+        if number is None:
             continue
-        number = subtitle_index
-        subtitle_index += 1
+        prefix = f"-metadata:s:{kind[0]}:{number}"
         title = _tag(stream.get("tags"), "title")
         handler = _tag(stream.get("tags"), "handler_name")
-        if stream["index"] in positions:
+        if kind == "audio":
+            desired_title = _audio_label(stream)
+            if desired_title != title:
+                command += [prefix, f"title={desired_title}"]
+            cleaned_handler = clean_title(handler, patterns)
+            if handler and cleaned_handler != handler:
+                command += [prefix, f"handler_name={cleaned_handler}"]
+            continue
+        cleaned_title = clean_title(title, patterns)
+        cleaned_handler = clean_title(handler, patterns)
+        if kind == "subtitle" and is_cleaned:
             command += [
                 f"-c:s:{number}", _output_subtitle_codec(suffix, stream),
                 f"-disposition:s:{number}", _disposition(stream, separator),
             ]
             language = _tag(stream.get("tags"), "language")
             if language:
-                command += [f"-metadata:s:s:{number}", f"language={language}"]
-            command += [
-                f"-metadata:s:s:{number}", f"title={clean_title(title, patterns)}",
-            ]
+                command += [prefix, f"language={language}"]
+            command += [prefix, f"title={cleaned_title}"]
             if handler:
-                command += [
-                    f"-metadata:s:s:{number}", f"handler_name={clean_title(handler, patterns)}",
-                ]
+                command += [prefix, f"handler_name={cleaned_handler}"]
         else:
-            if clean_title(title, patterns) != title:
-                command += [
-                    f"-metadata:s:s:{number}", f"title={clean_title(title, patterns)}",
-                ]
-            if handler and clean_title(handler, patterns) != handler:
-                command += [
-                    f"-metadata:s:s:{number}",
-                    f"handler_name={clean_title(handler, patterns)}",
-                ]
+            if cleaned_title != title:
+                command += [prefix, f"title={cleaned_title}"]
+            if handler and cleaned_handler != handler:
+                command += [prefix, f"handler_name={cleaned_handler}"]
+    cleaned_global = clean_title(global_title, patterns)
+    if cleaned_global != global_title:
+        command += ["-metadata", f"title={cleaned_global}"]
     command += [output]
     return command
 
@@ -215,19 +345,36 @@ async def clean_subtitles(listener, path, patterns):
     try:
         probe = await _probe(path, listener)
         streams = probe.get("streams") or []
-        subtitles = [s for s in streams if s.get("codec_type") == "subtitle"]
-        if not subtitles:
+        if not streams:
             return path
+        global_title = _tag((probe.get("format") or {}).get("tags"), "title")
+        subtitles = [s for s in streams if s.get("codec_type") == "subtitle"]
         working = tempfile.mkdtemp(
             prefix=".subclean-", dir=os.path.dirname(path) or "."
         )
         cleaned = {}
         dropped = set()
-        title_changed = False
+        metadata_changed = clean_title(global_title, normalized) != global_title
+        for stream in streams:
+            kind = stream.get("codec_type")
+            if kind not in {"video", "audio", "subtitle"}:
+                continue
+            title = _tag(stream.get("tags"), "title")
+            handler = _tag(stream.get("tags"), "handler_name")
+            if kind == "audio":
+                if _audio_label(stream) != title or (
+                    handler and clean_title(handler, normalized) != handler
+                ):
+                    metadata_changed = True
+                    break
+                continue
+            if clean_title(title, normalized) != title or (
+                handler and clean_title(handler, normalized) != handler
+            ):
+                metadata_changed = True
+                break
         for stream in subtitles:
             index = stream["index"]
-            title = _tag(stream.get("tags"), "title")
-            title_changed = title_changed or clean_title(title, normalized) != title
             if stream.get("codec_name") not in _TEXT_CODECS:
                 continue
             extension = "ass" if stream.get("codec_name") in _ASS_CODECS else "srt"
@@ -253,7 +400,7 @@ async def clean_subtitles(listener, path, patterns):
             elif filtered != raw:
                 Path(target).write_text(filtered, encoding="utf-8")
                 cleaned[index] = target
-        if not cleaned and not dropped and not title_changed:
+        if not cleaned and not dropped and not metadata_changed:
             return path
         output = os.path.join(working, f"cleaned{suffix}")
         for separator in ("+", ","):
@@ -270,6 +417,7 @@ async def clean_subtitles(listener, path, patterns):
                         normalized,
                         output,
                         separator,
+                        global_title,
                     ),
                     listener,
                     1800,
@@ -282,11 +430,11 @@ async def clean_subtitles(listener, path, patterns):
                     raise
         os.replace(output, path)
         LOGGER.info(
-            "Subtitle cleanup applied: %s | rewritten=%d dropped=%d title=%s",
+            "Track cleanup applied: %s | rewritten=%d dropped=%d titles=%s",
             os.path.basename(path),
             len(cleaned),
             len(dropped),
-            "cleaned" if title_changed else "unchanged",
+            "cleaned" if metadata_changed else "unchanged",
         )
     except _Cancelled:
         return path

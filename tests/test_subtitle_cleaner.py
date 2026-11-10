@@ -1,4 +1,5 @@
 from bot.helper.ext_utils.subtitle_cleaner import (
+    _audio_label,
     _build_remux_command,
     clean_title,
     filter_subtitle_text,
@@ -41,6 +42,8 @@ def test_clean_title_removes_matching_fragment_and_keeps_the_rest():
         "Subtitulos por"
     )
     assert clean_title("sitiospam.com", ["sitiospam.com"]) == ""
+    assert clean_title("www.sitiospam.com", ["sitiospam.com"]) == ""
+    assert clean_title("Forzados www.sitiospam.com", ["sitiospam.com"]) == "Forzados"
     assert clean_title(
         "Spanish, Mexico (Forced) [sitiospam.com]", ["sitiospam.com"]
     ) == "Spanish, Mexico (Forced)"
@@ -72,6 +75,78 @@ def test_filter_subtitle_text_returns_none_when_every_cue_matches():
 www.sitiospam.com
 """
     assert filter_subtitle_text(single, "subrip", ["sitiospam.com"]) is None
+
+
+def test_audio_label_uses_language_codec_and_channels():
+    spa = {
+        "codec_name": "eac3",
+        "channels": 6,
+        "channel_layout": "5.1(side)",
+        "tags": {"language": "spa"},
+    }
+    eng = {
+        "codec_name": "eac3",
+        "channels": 6,
+        "channel_layout": "5.1(side)",
+        "tags": {"language": "eng"},
+    }
+
+    assert _audio_label(spa) == "Español Latino Americano (E-AC-3 5.1)"
+    assert _audio_label(eng) == "Inglés (E-AC-3 5.1)"
+
+
+def test_remux_command_clears_matching_global_title():
+    command = _build_remux_command(
+        "ffmpeg",
+        "input.mkv",
+        ".mkv",
+        [],
+        [],
+        {},
+        set(),
+        ["sitiospam.com"],
+        "output.mkv",
+        "+",
+        "www.sitiospam.com",
+    )
+
+    assert "-metadata" in command
+    assert "title=" in command
+
+
+def test_remux_command_cleans_audio_and_video_titles_without_reencoding():
+    streams = [
+        {
+            "index": 0,
+            "codec_type": "video",
+            "codec_name": "h264",
+            "tags": {"title": "www.sitiospam.com"},
+        },
+        {
+            "index": 1,
+            "codec_type": "audio",
+            "codec_name": "eac3",
+            "tags": {"language": "spa", "title": "www.sitiospam.com"},
+        },
+    ]
+
+    command = _build_remux_command(
+        "ffmpeg",
+        "input.mkv",
+        ".mkv",
+        streams,
+        [],
+        {},
+        set(),
+        ["sitiospam.com"],
+        "output.mkv",
+        "+",
+    )
+
+    assert "-metadata:s:v:0" in command
+    assert "-metadata:s:a:0" in command
+    assert command.count("title=") == 2
+    assert command.count("copy") == 1
 
 
 def test_remux_command_replaces_only_cleaned_subtitle_tracks():

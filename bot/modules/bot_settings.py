@@ -266,7 +266,7 @@ DEFAULT_DESP = {
     "EQUAL_SPLITS": "Split oversized files into equal parts. Default: False.",
     "EXCLUDED_EXTENSIONS": "File extensions to exclude from upload/clone. Space-separated.",
     "FFMPEG_CMDS": "Custom FFmpeg command presets. Dict format.",
-    "SUBTITLE_SPAM_FILTER": "Case-insensitive list of text/domains removed from text subtitle cues before upload. Matching fragments are also stripped from track titles. Empty disables it. Example: [\"sitiospam.com\", \"Subtitulos por\"]",
+    "SUBTITLE_SPAM_FILTER": "Case-insensitive list of text/domains removed from subtitle cues and video/audio/subtitle track titles before upload. Empty disables it. Example: [\"sitiospam.com\", \"Subtitulos por\"]",
     "FILELION_API": "FileLion.cc API key for direct download support.",
     "MEDIA_STORE": "Store media metadata for re-upload. Default: True.",
     "FORCE_SUB_IDS": "Channel/Group IDs for force subscription. Space-separated.",

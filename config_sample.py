@@ -365,8 +365,8 @@ SUBTITLE_LANGS = "en"
 OPENSUBTITLES_API = ""
 
 # Case-insensitive list of text/domains removed before upload. Any subtitle
-# cue containing one is deleted; matching fragments are stripped from track
-# titles. Example: ["sitiospam.com", "Subtitulos por"]. Empty disables it.
+# cue containing one is deleted; matching fragments are stripped from video,
+# audio and subtitle track titles. Example: ["sitiospam.com"]. Empty disables it.
 SUBTITLE_SPAM_FILTER = []
 
 # Additional rclone upload remotes. Set to the rclone
