@@ -364,6 +364,11 @@ AUTO_SUBTITLES = False
 SUBTITLE_LANGS = "en"
 OPENSUBTITLES_API = ""
 
+# Case-insensitive list of text/domains removed before upload. Any subtitle
+# cue containing one is deleted; matching fragments are stripped from track
+# titles. Example: ["sitiospam.com", "Subtitulos por"]. Empty disables it.
+SUBTITLE_SPAM_FILTER = []
+
 # Additional rclone upload remotes. Set to the rclone
 # remote name configured via `rclone config`.
 RCLONE_SFTP_REMOTE = ""

@@ -55,6 +55,7 @@ from ..ext_utils.media_utils import (
 )
 from ..ext_utils.merge_order import episode_sort_key, natural_key
 from ..ext_utils.merge_media import validate_merge_encode_profile
+from ..ext_utils.subtitle_cleaner import clean_subtitles
 from ..ext_utils.multi_leech_utils import paginate_text_blocks
 from ..ext_utils.status_utils import get_readable_file_size, get_readable_time
 from ..ext_utils.task_manager import check_running_tasks, start_from_queued
@@ -627,6 +628,17 @@ class TaskListener(TaskConfig):
             if self.is_cancelled:
                 return
 
+            self.name = up_path.replace(f"{up_dir.rstrip('/')}/", "").split("/", 1)[0]
+            self.size = await get_path_size(up_path)
+            self.clear()
+
+        if Config.SUBTITLE_SPAM_FILTER and self.is_file:
+            up_path = await clean_subtitles(
+                self, up_path, Config.SUBTITLE_SPAM_FILTER
+            )
+            if self.is_cancelled:
+                return
+            self.is_file = await aiopath.isfile(up_path)
             self.name = up_path.replace(f"{up_dir.rstrip('/')}/", "").split("/", 1)[0]
             self.size = await get_path_size(up_path)
             self.clear()

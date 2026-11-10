@@ -248,6 +248,9 @@ class Config:
     # without subtitles (never fails the task).
     AUTO_SUBTITLES = False
     SUBTITLE_LANGS = "en"
+    # Case-insensitive text/domains removed from text subtitle cues and
+    # track titles before upload. Empty disables the cleanup.
+    SUBTITLE_SPAM_FILTER = []
     OPENSUBTITLES_API = ""
 
     # Phase 4.5/4.6/4.7 — additional rclone upload remotes. When set,

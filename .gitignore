@@ -88,3 +88,4 @@ tests/*
 !tests/test_database_connection_readiness.py
 !tests/test_podman_firewall.py
 !tests/test_shutdown_signals.py
+!tests/test_subtitle_cleaner.py
