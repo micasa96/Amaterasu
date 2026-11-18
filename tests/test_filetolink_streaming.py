@@ -54,6 +54,12 @@ PLAYLIST_TEMPLATE_PATH = (
     Path(__file__).parents[1] / "web" / "templates" / "playlist.html"
 )
 PLAYER_JS_PATH = Path(__file__).parents[1] / "web" / "static" / "js" / "player.js"
+PLAYER_PAGE_PATH = (
+    Path(__file__).parents[1] / "web" / "ui" / "src" / "pages" / "player" / "Page.svelte"
+)
+PLAYLIST_PAGE_PATH = (
+    Path(__file__).parents[1] / "web" / "ui" / "src" / "pages" / "playlist" / "Page.svelte"
+)
 LIBMEDIA_JS_PATH = (
     Path(__file__).parents[1] / "web" / "static" / "js" / "libmedia-player.js"
 )
@@ -481,18 +487,26 @@ def test_wzmlx_media_features_are_wired_into_filetolink():
     assert DEFAULT_POSTER_PATH.is_file()
     assert DEFAULT_POSTER_PATH.stat().st_size > 10_000
 
-    assert 'poster="{{ poster_url }}"' in player
-    assert "tracksUrl" in player
-    assert "playlist-prev-btn" in player
-    assert "playlist-next-btn" in player
-    assert "am-control-row" in player
-    assert "am-transport-controls" in player
-    assert "am-player-tools" in player
-    assert "/static/js/libmedia-player.js?v={{ asset_version }}" in player
-    assert "/static/js/player.js?v={{ asset_version }}" in player
-    assert "/static/css/player.css?v={{ asset_version }}" in player
-    assert "/static/css/player.css?v={{ asset_version }}" in playlist
+    # The templates hand server data to the shared Svelte pages; the player
+    # page renders the controls and loads the vanilla runtime as hashed assets.
+    player_page = PLAYER_PAGE_PATH.read_text(encoding="utf-8")
+    playlist_page = PLAYLIST_PAGE_PATH.read_text(encoding="utf-8")
+    assert "{% block page %}player{% endblock %}" in player
+    for key in ('"poster_url": poster_url', '"tracks_url": tracks_url', '"playlist": playlist|'):
+        assert key in player
+    assert "poster={d.poster_url" in player_page
+    assert "tracksUrl: d.tracks_url" in player_page
+    assert "playlist-prev-btn" in player_page
+    assert "playlist-next-btn" in player_page
+    assert "am-control-row" in player_page
+    assert "am-transport-controls" in player_page
+    assert "am-player-tools" in player_page
+    assert 'static/js/libmedia-player.js?url"' in player_page
+    assert 'static/js/player.js?url"' in player_page
+    assert "loadScript(libmediaPlayerUrl)" in player_page
+    assert "{% block page %}playlist{% endblock %}" in playlist
     assert "playlist_token" in playlist
+    assert "X-Amaterasu-Action" in playlist_page
 
     assert "loadTrackInfo" in player_js
     assert "activateAdvancedDecoder" in player_js
@@ -506,7 +520,7 @@ def test_wzmlx_media_features_are_wired_into_filetolink():
         "subtitle.embedded && !subtitlePlainText?.checked && window.AmaterasuLibmediaPlayer"
         in player_js
     )
-    assert 'id="subtitle-plain-text"' in player
+    assert 'id="subtitle-plain-text"' in player_page
     assert "embedded: true" in player_js
     assert "const selectionId = ++subtitleSelectionId" in player_js
     assert "await video.setSubtitleEnabled(false)" in player_js
@@ -517,8 +531,8 @@ def test_wzmlx_media_features_are_wired_into_filetolink():
     assert "await loadHlsIfNeeded();" in player_js
     assert "!video.paused && !video.ended && !rafId" in player_js
     assert "requestAnimationFrame(updateProgress)" not in player_js
-    assert '<a class="stream-download-btn" id="main-download-btn"' in player
-    assert '<main class="playlist-page">' not in playlist
+    assert 'id="main-download-btn" href={downloadHref}' in player_page
+    assert '<main class="playlist-page">' not in playlist_page
     assert "@libmedia/avplayer@1.3.1" in libmedia_js
     assert '[1, "Audio"].includes(stream.mediaType)' in player_js
     assert '[1, "Audio"].includes(stream.mediaType)' in libmedia_js

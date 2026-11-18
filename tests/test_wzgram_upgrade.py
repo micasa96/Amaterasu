@@ -44,7 +44,7 @@ from bot.core.tg_client import (
 )
 
 ROOT = Path(__file__).resolve().parents[1]
-EXPECTED_WZGRAM_VERSION = "3.1.5"
+EXPECTED_WZGRAM_VERSION = "3.1.7"
 EXPECTED_WARPCRYPTO_VERSION = "2.0.8"
 
 

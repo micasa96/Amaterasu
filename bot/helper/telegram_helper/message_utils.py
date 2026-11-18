@@ -1,9 +1,10 @@
-from asyncio import gather, sleep
+from asyncio import Event, gather, sleep, wait_for
 from html import escape as html_escape
 from random import choice
 from re import match as re_match
 from re import search as re_search
 from re import sub
+from secrets import token_hex
 from time import time
 from urllib.parse import urlsplit
 
@@ -747,6 +748,15 @@ async def update_status_message(sid, force=False):
                         f"Status with id: {sid} haven't been updated. Error: {message}"
                     )
                 return
+            # edit_message may replace a text status with a new photo message
+            # (and delete the old one). Track the replacement; otherwise every
+            # tick would edit the deleted message and post yet another photo.
+            if (
+                message is not None
+                and getattr(message, "id", None) is not None
+                and message.id != status_dict[sid]["message"].id
+            ):
+                status_dict[sid]["message"] = message
             status_dict[sid]["message"].text = text
             status_dict[sid]["time"] = time()
 
@@ -819,52 +829,90 @@ async def send_status_message(msg, user_id=0):
             )
 
 
-async def open_category_btns(message):
-    user_id = message.from_user.id
-    msg_id = message.id
+def get_drive_categories(user_id):
+    user_settings = user_data.get(user_id, {})
+    default_id = user_settings.get("GDRIVE_ID") or Config.GDRIVE_ID
+    categories = fetch_drive_cat(user_id).copy()
+    for name, category in categories_dict.items():
+        categories.setdefault(name, category)
+    if default_id:
+        categories.pop("Default", None)
+        categories = {
+            "Default": {
+                "drive_id": default_id,
+                "index_link": user_settings.get("INDEX_URL") or Config.INDEX_URL,
+            },
+            **categories,
+        }
+    return categories
+
+
+def drive_category_prompt(picker_id, state):
     buttons = ButtonMaker()
-    cat_name = None
-    dcats = fetch_drive_cat(user_id)
-    default_id = user_data.get(user_id, {}).get("GDRIVE_ID") or Config.GDRIVE_ID
-    default_index = user_data.get(user_id, {}).get("INDEX_URL") or Config.INDEX_URL
-    merged = {
-        "Default": {"drive_id": default_id, "index_link": default_index},
-        **dcats,
-        **categories_dict,
-    }
-    for i, name in enumerate(merged):
-        if i == 0:
-            cat_name = name
+    selected = state["selected"] or 0
+    categories = state["categories"]
+    for index, (name, _) in enumerate(categories):
         buttons.data_button(
-            f'{"✓️" if i == 0 else ""} {name}',
-            f"scat {user_id} {msg_id} {name.replace(' ', '_')}",
+            f'{"✓️" if index == selected else ""} {name}',
+            f"scat {picker_id} {index}",
         )
     buttons.data_button(
-        "Cancel", f"scat {user_id} {msg_id} scancel", "footer", style=ButtonStyle.DANGER
+        "Cancel", f"scat {picker_id} cancel", "footer", style=ButtonStyle.DANGER
     )
     buttons.data_button(
-        "Done (60)", f"scat {user_id} {msg_id} sdone", "footer", style=ButtonStyle.SUCCESS
+        "Done", f"scat {picker_id} done", "footer", style=ButtonStyle.SUCCESS
     )
-    prompt = await send_message(
-        message,
+    return (
         f"<b>Select the category where you want to upload</b>\n\n"
-        f"<i><b>Upload Category:</b></i> <code>{cat_name or 'None'}</code>\n\n"
+        f"<i><b>Upload Category:</b></i> <code>{html_escape(categories[selected][0])}</code>\n\n"
         f"<b>Timeout:</b> 60 sec",
         buttons.build_menu(3),
     )
-    start_time = time()
-    bot_cache[msg_id] = [None, None, False, False, start_time]
-    while time() - start_time <= 60:
-        await sleep(0.5)
-        if bot_cache[msg_id][2] or bot_cache[msg_id][3]:
-            break
-    drive_id, index_link, _, is_cancelled, __ = bot_cache[msg_id]
-    if not is_cancelled:
+
+
+async def open_category_btns(message, *, use_default_on_timeout=False):
+    sender = message.from_user or message.sender_chat
+    categories = tuple(
+        (name, category)
+        for name, category in get_drive_categories(sender.id).items()
+        if category.get("drive_id")
+    )
+    if not categories:
+        return None, None, False
+
+    picker_id = token_hex(8)
+    key = ("drive_category", picker_id)
+    state = {
+        "user_id": sender.id,
+        "chat_id": message.chat.id,
+        "categories": categories,
+        "selected": None,
+        "finished": Event(),
+        "cancelled": False,
+    }
+    bot_cache[key] = state
+    try:
+        prompt = await send_message(message, *drive_category_prompt(picker_id, state))
+        if not isinstance(prompt, Message):
+            raise ValueError("Could not send the Drive Category picker. Try again.")
+
+        try:
+            await wait_for(state["finished"].wait(), timeout=60)
+        except TimeoutError:
+            state["finished"].set()
+            if use_default_on_timeout and state["selected"] is None:
+                state["selected"] = 0
+
+        if state["cancelled"]:
+            await edit_message(prompt, "<b>Task Cancelled</b>")
+            return None, None, True
         await delete_message(prompt)
-    else:
-        await edit_message(prompt, "<b>Task Cancelled</b>")
-    del bot_cache[msg_id]
-    return drive_id, index_link, is_cancelled
+        if state["selected"] is None:
+            return None, None, False
+        category = categories[state["selected"]][1]
+        return category["drive_id"], category.get("index_link"), False
+    finally:
+        bot_cache.pop(key, None)
 
 
 def build_leech_dump_selection_buttons(user_id, msg_id, dumps, selected):

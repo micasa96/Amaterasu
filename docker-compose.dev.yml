@@ -4,7 +4,7 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        BASE_IMAGE: docker.io/nbots/amaterasu:v1
+        BASE_IMAGE: ${AMATERASU_BASE_IMAGE:-docker.io/nbots/amaterasu:v1}
     image: amaterasu:local
     pull_policy: never
     container_name: amaterasu-bot
@@ -23,6 +23,8 @@ services:
       # Pass through only when explicitly set in the shell or .env. Otherwise
       # config.py / MongoDB / the built-in False default remain authoritative.
       - AUTO_UPDATE
+      - USE_GO_ENGINE
+      - USE_RUST_CORE
     ports:
       - "82:8080"
     volumes:

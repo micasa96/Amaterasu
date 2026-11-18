@@ -1,51 +1,53 @@
 <!DOCTYPE html>
-<html lang="en">
+{#-
+  Host for every Amaterasu web page.
+
+  FastAPI keeps routing, auth and server data. A page template extends this
+  file and fills two blocks:
+
+    {% block page %}encode-profiles{% endblock %}
+        -> mounts web/ui/src/pages/encode-profiles/Page.svelte
+    {% block page_data %}{{ {"user_id": user_id}|tojson }}{% endblock %}
+        -> passed to the page as its `data` prop
+
+  Styles, components and the app shell come from the shared Svelte design
+  system in web/ui (built to /static/dist; wserver.py reads its manifest). Change it there and every page
+  follows.
+-#}
+<html lang="en" data-theme="dark" data-version="{{ app_version|default('') }}">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="color-scheme" content="light dark" />
   <title>{% block title %}Amaterasu{% endblock %}</title>
   {% include "brand_icons.html" %}
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/css/main.css" />
-  {% block extra_css %}{% endblock %}
+  <script>
+    // Apply the saved theme before first paint (see lib/preferences.svelte.ts).
+    try {
+      var t = localStorage.getItem("amaterasu.theme");
+      document.documentElement.dataset.theme =
+        t === "light" || t === "system" ? t : "dark";
+    } catch (e) {
+      document.documentElement.dataset.theme = "dark";
+    }
+  </script>
+  {%- set ui = ui_assets|default({"js": "", "css": []}) %}
+  {%- for href in ui.css %}
+  <link rel="stylesheet" href="{{ href }}" />
+  {%- endfor %}
+  {%- if ui.js %}
+  <script type="module" src="{{ ui.js }}"></script>
+  {%- endif %}
+  {% block head %}{% endblock %}
 </head>
 <body>
-  {% block navbar %}
-  <nav class="bs-navbar">
-    <div class="bs-navbar__inner">
-      <a href="/" class="bs-navbar__brand" aria-label="Amaterasu home">
-        <img class="bs-navbar__logo" src="/static/images/brand/blackflare.svg" width="32" height="32" alt="" />
-        <span class="bs-navbar__title"><img class="bs-navbar__wordmark" src="/static/images/brand/wordmark-white.svg" width="128" height="20" alt="Amaterasu" /></span>
-      </a>
-      <div class="bs-navbar__links">
-        <!-- Links removed to keep pages visually isolated -->
-      </div>
-      <div class="bs-navbar__actions">
-        <!-- Status indicator -->
-        <div class="bs-status-badge bs-status-badge--online">
-          <span class="bs-status-badge__dot"></span>
-          <span>Online</span>
-        </div>
-      </div>
-    </div>
-  </nav>
-  {% endblock %}
-
-  <main class="bs-main">
-    {% block content %}{% endblock %}
-  </main>
-
-  <div id="bs-toast-container" class="bs-toast-container"></div>
-  <script src="/static/js/ui.js" defer></script>
-  <!-- Lucide Icons -->
-  <script src="https://unpkg.com/lucide@latest"></script>
-  <script>
-    document.addEventListener("DOMContentLoaded", () => {
-      lucide.createIcons();
-    });
-  </script>
-  {% block extra_js %}{% endblock %}
+  <div id="app" data-page="{% block page %}{% endblock %}">
+    <noscript>
+      <p style="padding:2rem;font-family:system-ui,sans-serif">
+        Amaterasu needs JavaScript to show this page. Enable it and reload.
+      </p>
+    </noscript>
+  </div>
+  <script type="application/json" id="page-data">{% block page_data %}{}{% endblock %}</script>
 </body>
 </html>

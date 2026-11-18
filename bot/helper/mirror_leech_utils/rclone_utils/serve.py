@@ -56,5 +56,8 @@ async def rclone_serve_booter():
     ]
     if (user := Config.RCLONE_SERVE_USER) and (pswd := Config.RCLONE_SERVE_PASS):
         cmd.extend(("--user", user, "--pass", pswd))
+    from ....core.startup import configure_go_stream
+
+    await configure_go_stream()
     rcs = await create_subprocess_exec(*cmd)
     RcloneServe.append(rcs)

@@ -74,7 +74,12 @@ verify() {
         ffmpeg -hide_banner -encoders 2>/dev/null | grep -F "libaom-av1"
         ffmpeg -hide_banner -decoders 2>/dev/null | grep -F "libdav1d"
         echo
-        echo "[4] Mega SDK Python:"
+        echo "[4] SVT-AV1 (5fish):"
+        /opt/amaterasu-5fish/bin/ffmpeg -v error -f lavfi -i color=size=128x128:rate=24 \
+            -frames:v 2 -c:v libsvtav1 -pix_fmt yuv420p10le -preset 2 -crf 26 -err_detect:v +explode \
+            -svtav1-params "lp=1:keyint=225:lineart-psy-bias=3:texture-psy-bias=3" -f null -
+        echo
+        echo "[5] Mega SDK Python:"
         python3 -c "from mega import MegaApi; import os; print(\"{}: OK\".format(os.environ.get(\"MEGA_SDK_VERSION\", \"unknown\")))"
         echo
         echo "ALL CHECKS PASSED"

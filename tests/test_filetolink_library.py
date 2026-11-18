@@ -176,6 +176,31 @@ async def test_zip_stalled_source_fails_without_holding_capacity(tmp_path):
     assert not list(tmp_path.glob("*.part"))
 
 
+@pytest.mark.asyncio
+async def test_streamed_zip_disconnect_closes_source_without_completing(tmp_path):
+    closed = False
+
+    async def read(item):
+        nonlocal closed
+        try:
+            yield b"ab"
+            yield b"cd"
+        finally:
+            closed = True
+
+    cache = PlaylistArchives(tmp_path, 0, lambda: 0, lambda n: None)
+    tracker = TransferTotals()
+    archive = cache.stream([dict(name="one.bin", size=4)], read)
+    response = tracker.track(archive, None, key=None, kind="zip")
+    await anext(response)
+    await response.aclose()
+    assert closed
+    assert tracker.values["zip_downloads"] == 0
+    assert tracker.values["incomplete"] == 1
+    assert tracker.active == 0
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_shared_cache_budget_keeps_unexpired_archives_and_counts_reservations(tmp_path):
     (tmp_path / "archives").mkdir()
     archive = tmp_path / "archives" / "valid.zip"
@@ -369,6 +394,38 @@ async def test_real_zip_routes_head_ranges_restart_expiry_and_access(tmp_path, m
         metadata["expires"] = time.time() - 1
         meta.write_text(__import__("json").dumps(metadata))
         assert (await client.get(urls["download_url"])).status_code == 410
+
+        uncached = tmp_path / "uncached"
+        server.playlist_archives = PlaylistArchives(uncached, 1, lambda: 0, lambda n: None)
+        playlist["items"].append(dict(token=media_token, name="two.bin"))
+        response = await client.post(
+            f"/playlist/{token}/zip", headers={"X-Amaterasu-Action": "archive"}
+        )
+        assert response.status_code == 200, response.text
+        direct = response.json()
+        assert direct == {
+            "status_url": f"/playlist/{token}/zip/stream/status",
+            "download_url": f"/playlist/{token}/zip/stream",
+            "stream": True,
+        }
+        # Older playlist bundles always poll status_url, even for a direct ZIP.
+        status = await client.get(direct["status_url"])
+        assert status.status_code == 200 and status.json()["state"] == "ready"
+        completed = tracker.values["zip_downloads"]
+        response = await client.get(direct["download_url"], headers={"Range": "bytes=0-1"})
+        assert response.status_code == 200
+        assert response.headers["content-type"] == "application/zip"
+        assert "content-range" not in response.headers
+        with ZipFile(io.BytesIO(response.content)) as archive:
+            assert archive.testzip() is None
+            assert {name: archive.read(name) for name in archive.namelist()} == {
+                "001-one.bin": b"abcd", "002-two.bin": b"abcd",
+            }
+        assert tracker.values["zip_downloads"] == completed + 1
+        assert list(uncached.iterdir()) == []
+        server._web_secret = lambda: "rotated-secret"
+        assert (await client.get(direct["status_url"])).status_code == 403
+        assert (await client.get(direct["download_url"])).status_code == 403
     await cache.close()
 
 

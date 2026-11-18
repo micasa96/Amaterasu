@@ -1,4 +1,4 @@
-"""Private library and immutable playlist ZIP endpoints."""
+"""Private library and playlist ZIP endpoints."""
 
 import asyncio
 import re
@@ -8,10 +8,12 @@ from urllib.parse import quote, urlencode
 from fastapi import APIRouter, HTTPException, Request
 
 from web.media_library import MediaLibrary
+from web.playlist_archive import ArchiveCapacityError
 from web.security import make_route_token, verify_route_token, verify_signed_token
 
 router = APIRouter()
 _prepare_slots = asyncio.Semaphore(2)
+_stream_zip_slots = asyncio.Semaphore(2)
 
 
 def library_access(request, secret):
@@ -141,13 +143,7 @@ async def _archive_source(item):
         server._release_stream_load(client_id)
 
 
-@router.post("/playlist/{token}/zip")
-async def prepare_playlist_zip(token: str, request: Request):
-    from web import wserver as server
-
-    if request.headers.get("x-amaterasu-action") != "archive":
-        raise HTTPException(403, "Start ZIP preparation from the playlist page.")
-    playlist = await _playlist(token)
+async def _archive_files(playlist, server):
     try:
         async with asyncio.timeout(25), _prepare_slots:
             files = []
@@ -157,7 +153,8 @@ async def prepare_playlist_zip(token: str, request: Request):
                 try:
                     media = server.get_media(message)
                     unique_id = getattr(media, "file_unique_id", "")
-                    if not unique_id:
+                    size = int(getattr(media, "file_size", 0) or 0)
+                    if not unique_id or size <= 0:
                         raise ValueError(
                             "A playlist file is unavailable. Use its individual download to check it."
                         )
@@ -166,15 +163,39 @@ async def prepare_playlist_zip(token: str, request: Request):
                             chat_id=chat,
                             message_id=ident,
                             unique_id=unique_id,
-                            size=int(getattr(media, "file_size", 0)),
+                            size=size,
                             name=str(item.get("name") or "Media"),
                         )
                     )
                 finally:
                     server._release_stream_load(client_id)
-            key = await server.playlist_archives.start(token, files, _archive_source)
+            return files
     except TimeoutError as exc:
         raise HTTPException(503, "Checking the playlist timed out. Try again shortly.") from exc
+    except (ValueError, OSError) as exc:
+        raise HTTPException(413, str(exc)) from exc
+
+
+@router.post("/playlist/{token}/zip")
+async def prepare_playlist_zip(token: str, request: Request):
+    from web import wserver as server
+
+    if request.headers.get("x-amaterasu-action") != "archive":
+        raise HTTPException(403, "Start ZIP preparation from the playlist page.")
+    playlist = await _playlist(token)
+    try:
+        async with asyncio.timeout(25):
+            files = await _archive_files(playlist, server)
+            key = await server.playlist_archives.start(token, files, _archive_source)
+    except ArchiveCapacityError:
+        download_url = f"/playlist/{token}/zip/stream"
+        return server._no_store(
+            server.JSONResponse(dict(
+                status_url=f"{download_url}/status", download_url=download_url, stream=True,
+            ))
+        )
+    except TimeoutError as exc:
+        raise HTTPException(503, "Checking the ZIP timed out. Try again shortly.") from exc
     except (ValueError, OSError) as exc:
         raise HTTPException(413, str(exc)) from exc
     return server._no_store(
@@ -192,6 +213,8 @@ async def playlist_zip_status(token: str, key: str):
     from web import wserver as server
 
     await _playlist(token)
+    if key == "stream":
+        return server._no_store(server.JSONResponse(dict(state="ready")))
     try:
         state = server.playlist_archives.status(key)
     except ValueError as exc:
@@ -201,6 +224,42 @@ async def playlist_zip_status(token: str, key: str):
             410, "The ZIP expired or preparation failed. Prepare it again from the playlist."
         )
     return server._no_store(server.JSONResponse(state))
+
+
+def _zip_headers(playlist):
+    name = (
+        re.sub(r'[\x00-\x1f\x7f/\\:<>"|?*]', "_", str(playlist.get("name") or "Playlist"))[
+            :120
+        ].rstrip(" .")
+        or "Playlist"
+    )
+    return {
+        "Content-Disposition": "attachment; filename*=UTF-8''" + quote(name + ".zip", safe=""),
+        "X-Content-Type-Options": "nosniff",
+        "Referrer-Policy": "no-referrer",
+        "Cache-Control": "private, no-store",
+    }
+
+
+@router.get("/playlist/{token}/zip/stream")
+async def stream_playlist_zip(token: str):
+    from web import wserver as server
+
+    playlist = await _playlist(token)
+    files = await _archive_files(playlist, server)
+    if _stream_zip_slots.locked():
+        raise HTTPException(503, "Two ZIP downloads are active. Try again shortly.")
+
+    async def stream():
+        archive = server.playlist_archives.stream(files, _archive_source)
+        async with _stream_zip_slots, aclosing(archive) as source:
+            async for chunk in source:
+                yield chunk
+
+    return server._FileToLinkStreamingResponse(
+        stream(), media_type="application/zip", headers=_zip_headers(playlist),
+        transfer={"length": None, "key": None, "kind": "zip"},
+    )
 
 
 @router.api_route("/playlist/{token}/zip/{key}", methods=["GET", "HEAD"])
@@ -222,20 +281,11 @@ async def download_playlist_zip(token: str, key: str, request: Request):
         range_header = None
     start, end, ranged = server._parse_range_header(range_header, state["bytes"])
     length = end - start + 1
-    name = (
-        re.sub(r'[\x00-\x1f\x7f/\\:<>"|?*]', "_", str(playlist.get("name") or "Playlist"))[
-            :120
-        ].rstrip(" .")
-        or "Playlist"
-    )
     headers = {
+        **_zip_headers(playlist),
         "Content-Length": str(length),
         "Accept-Ranges": "bytes",
         "ETag": etag,
-        "Content-Disposition": "attachment; filename*=UTF-8''" + quote(name + ".zip", safe=""),
-        "X-Content-Type-Options": "nosniff",
-        "Referrer-Policy": "no-referrer",
-        "Cache-Control": "private, no-store",
     }
     if ranged:
         headers["Content-Range"] = f"bytes {start}-{end}/{state['bytes']}"

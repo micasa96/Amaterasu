@@ -10,7 +10,7 @@ def filter_links(links_list, bulk_start, bulk_end):
 
 def get_links_from_message(text):
     links_list = text.split("\n")
-    return [item.strip() for item in links_list if len(item) != 0]
+    return [item.strip() for item in links_list if item.strip()]
 
 
 async def get_links_from_file(message):
@@ -18,7 +18,7 @@ async def get_links_from_file(message):
     text_file_dir = await message.download()
     async with aiopen(text_file_dir, "r+") as f:
         lines = await f.readlines()
-        links_list.extend(line.strip() for line in lines if len(line) != 0)
+        links_list.extend(line.strip() for line in lines if line.strip())
     await remove(text_file_dir)
     return links_list
 

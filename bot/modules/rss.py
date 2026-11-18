@@ -729,7 +729,7 @@ async def rss_monitor():
                             summary = rss_d.entries[feed_count]["summary"]
                             matches = size_regex.findall(summary)
                             sizes = [match[0] for match in matches]
-                            size = get_size_bytes(sizes[0])
+                            size = get_size_bytes(sizes[0]) if sizes else 0
                         else:
                             size = 0
                     except IndexError:

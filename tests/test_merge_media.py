@@ -588,6 +588,11 @@ def test_font_collection_checks_identity_of_every_face():
 
 
 def test_continuous_profile_rejects_settings_it_cannot_honor():
+    assert "outputs MKV" in validate_merge_encode_profile({"container": "mp4"})
+    assert not validate_merge_encode_profile({"container": "mkv"})
+    assert "individual encodes only" in validate_merge_encode_profile({
+        "video_codec": "libsvtav1", "svtav1_variant": "5fish",
+    })
     assert "keyframe interval" in validate_merge_encode_profile({
         "video_codec": "libx264", "audio_codec": "aac",
         "video_params": {"keyint_seconds": 4},

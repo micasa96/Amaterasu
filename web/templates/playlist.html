@@ -1,50 +1,9 @@
 {% extends "base.html" %}
-
-{% block title %}Amaterasu Playlist | {{ playlist_name }}{% endblock %}
-
-{% block extra_css %}
-<link rel="stylesheet" href="/static/css/player.css?v={{ asset_version }}" />
-<link rel="stylesheet" href="/static/css/library.css" />
-{% endblock %}
-
-{% block content %}
-<div class="playlist-page">
-  <header class="playlist-header">
-    <div>
-      <span class="playlist-eyebrow">AMATERASU PLAYLIST</span>
-      <h1>{{ playlist_name }}</h1>
-      <p>{{ items | length }} media files ready to stream.</p>
-    </div>
-    <a class="playlist-play-all" href="{{ items[0].watch_url }}?list={{ playlist_token }}">
-      <i data-lucide="play"></i>
-      Play from start
-    </a>
-  </header>
-
-  <section class="zip-panel" id="playlist-zip" data-url="/playlist/{{ playlist_token }}/zip" aria-label="Download playlist as ZIP">
-    <button class="zip-button" type="button">Prepare playlist ZIP</button>
-    <p role="status" aria-live="polite">Prepare one ZIP before downloading. Temporary ZIPs share the server’s cache space and expire after 24 hours.</p>
-    <progress max="1" hidden aria-label="ZIP preparation progress"></progress>
-    <a hidden download>Download ZIP</a>
-    <noscript><p>JavaScript is needed to prepare a ZIP. Individual downloads remain available below.</p></noscript>
-  </section>
-  <section class="playlist-grid" aria-label="Playlist files">
-    {% for item in items %}
-    <article class="playlist-card">
-      <a class="playlist-art" href="{{ item.watch_url }}?list={{ playlist_token }}" aria-label="Play {{ item.name }}">
-        <img src="{{ item.poster_url }}" alt="" loading="lazy" onerror="this.hidden=true" />
-        <span class="playlist-index">{{ "%02d" | format(loop.index) }}</span>
-        <span class="playlist-play"><i data-lucide="play"></i></span>
-      </a>
-      <div class="playlist-card-body">
-        <a class="playlist-name" href="{{ item.watch_url }}?list={{ playlist_token }}">{{ item.name }}</a>
-        <a class="playlist-download" href="{{ item.download_url }}" aria-label="Download {{ item.name }}">
-          <i data-lucide="download"></i>
-        </a>
-      </div>
-    </article>
-    {% endfor %}
-  </section>
-</div>
-{% endblock %}
-{% block extra_js %}<script src="/static/js/playlist-zip.js" defer></script>{% endblock %}
+{% block title %}{{ playlist_name }} — Amaterasu{% endblock %}
+{% block page %}playlist{% endblock %}
+{% block page_data %}{{ {
+  "playlist_name": playlist_name|default("Playlist"),
+  "playlist_token": playlist_token,
+  "zip_url": "/playlist/" ~ playlist_token ~ "/zip",
+  "items": items|default([]),
+}|tojson }}{% endblock %}

@@ -69,7 +69,7 @@ async def start(_, message):
     lang = Language()
     buttons = ButtonMaker()
     buttons.url_button(
-        lang.START_BUTTON1, "https://github.com/Zan-getsu/Amaterasu"
+        lang.START_BUTTON1, "https://github.com/its-niloy/Amaterasu"
     )
     buttons.url_button(lang.START_BUTTON2, "https://t.me/itsniloybhowmick")
     reply_markup = buttons.build_menu(2)
@@ -238,46 +238,13 @@ async def ping(_, message):
 
 
 # --- Log redaction ------------------------------------------------------
-# Patterns that match credential-bearing substrings in log lines.
-# Each pattern is replaced with the captured group + '[REDACTED]'.
-_REDACT_PATTERNS = [
-    # /qbit/?pass=... / /nzb/?pass=...
-    re_compile(r"(pass=)[A-Za-z0-9]+"),
-    # api_key=..., apikey=..., key=..., token=..., password=..., secret=...
-    re_compile(r"((?:api_?key|key|token|password|secret|apikey)=)[^\s&]+", re_IGNORECASE),
-    # Authorization: Bearer ...
-    re_compile(r"(Authorization:\s*Bearer\s+)[A-Za-z0-9._\-]+", re_IGNORECASE),
-    # MongoDB connection string with credentials:
-    # mongodb://user:pass@host
-    re_compile(r"(mongodb(?:\+srv)?://[^:/@\s]+:)[^@/\s]+(@)"),
-    # Generic email:pass pairs (e.g. JD_EMAIL:JD_PASS, MEGA_EMAIL:MEGA_PASSWORD)
-    re_compile(r"((?:JD_PASS|MEGA_PASSWORD|LOGIN_PASS)\s*=\s*)[^\s]+", re_IGNORECASE),
-    # BOT_TOKEN value patterns (numeric:id:hex) — common when log lines
-    # echo the token by accident
-    re_compile(r"(\bBOT_TOKEN\s*=\s*)\d+:[A-Za-z0-9_\-]+", re_IGNORECASE),
-]
-
-
-def _redact_log_content(text: str) -> str:
-    """Redact known credential patterns from a log string.
-
-    Applied before sending log.txt to a chat or pastebin. Catches the
-    most common leaks (pass=, api_key=, Authorization: Bearer, MongoDB
-    URL with creds, BOT_TOKEN=). Not exhaustive — operators should still
-    avoid logging secrets in the first place.
-    """
-    def _replace(m):
-        # Always preserve group(1) (the prefix like 'pass=' or 'mongodb://user:')
-        out = m.group(1) + "[REDACTED]"
-        # If the pattern has a group(2) (e.g. the '@' in mongodb://user:pass@host),
-        # preserve it too so the log line stays readable.
-        if m.lastindex and m.lastindex >= 2:
-            out += m.group(2)
-        return out
-
-    for pattern in _REDACT_PATTERNS:
-        text = pattern.sub(_replace, text)
-    return text
+# The rules live in helper/ext_utils/log_redact.py so the web live-log
+# viewer applies exactly the same redaction.
+from .live_logs import LIVE_LOGS_BUTTON, send_live_logs_link  # noqa: E402
+from ..helper.ext_utils.log_redact import (  # noqa: E402
+    REDACT_PATTERNS as _REDACT_PATTERNS,
+    redact_log_text as _redact_log_content,
+)
 
 
 @new_task
@@ -286,6 +253,7 @@ async def log(_, message):
     buttons = ButtonMaker()
     buttons.data_button("▤ VIEW LOG", f"log {uid} disp")
     buttons.data_button("↗ WEB PASTE", f"log {uid} web")
+    buttons.data_button(LIVE_LOGS_BUTTON, f"log {uid} live")
     buttons.data_button("✕ CLOSE", f"log {uid} close", style=ButtonStyle.DANGER)
     # Read log.txt, redact secrets, write to a temp file, send that.
     # Avoids sending the raw log.txt which may contain pass= / token=
@@ -324,6 +292,8 @@ async def log_cb(_, query):
     elif data[2] == "close":
         await query.answer()
         await delete_message(message, message.reply_to_message)
+    elif data[2] == "live":
+        await send_live_logs_link(_, query)
     elif data[2] == "disp":
         await query.answer("Fetching Log..")
         async with aiopen("log.txt", "r") as f:

@@ -1,24 +1,18 @@
-from time import time
-
-from .. import bot_cache, categories_dict, task_dict, task_dict_lock, user_data
-from ..core.config_manager import Config
+from .. import bot_cache, task_dict, task_dict_lock
 from ..helper.ext_utils.bot_utils import (
     arg_parser,
-    fetch_drive_cat,
     new_task,
     sync_to_async,
 )
 from ..helper.ext_utils.links_utils import is_gdrive_link
 from ..helper.ext_utils.status_utils import (
     MirrorStatus,
-    get_readable_time,
     get_task_by_gid,
 )
 from ..helper.mirror_leech_utils.gdrive_utils.helper import GoogleDriveHelper
-from pyrogram.enums import ButtonStyle
-from ..helper.telegram_helper.button_build import ButtonMaker
 from ..helper.telegram_helper.filters import CustomFilters
 from ..helper.telegram_helper.message_utils import (
+    drive_category_prompt,
     edit_message,
     open_category_btns,
     send_message,
@@ -77,7 +71,10 @@ async def change_category(client, message):
     listener = dl.listener if hasattr(dl, "listener") else None
     if listener and not listener.is_leech:
         if not index_link and not drive_id:
-            drive_id, index_link, is_cancelled = await open_category_btns(message)
+            try:
+                drive_id, index_link, is_cancelled = await open_category_btns(message)
+            except ValueError as error:
+                return await send_message(message, str(error))
             if is_cancelled:
                 listener.is_cancelled = True
                 return
@@ -110,52 +107,34 @@ async def change_category(client, message):
 
 @new_task
 async def confirm_category(client, query):
-    user_id = query.from_user.id
-    data = query.data.split(maxsplit=3)
-    msg_id = int(data[2])
-    if msg_id not in bot_cache:
-        return await edit_message(query.message, "<b>Old Task</b>")
-    elif user_id != int(data[1]) and not await CustomFilters.sudo("", query):
+    parts = query.data.split(maxsplit=2)
+    if len(parts) != 3:
+        return await query.answer()
+    _, picker_id, action = parts
+    state = bot_cache.get(("drive_category", picker_id))
+    if (
+        not state
+        or state["chat_id"] != query.message.chat.id
+        or state["finished"].is_set()
+    ):
+        return await query.answer(text="This picker has expired.", show_alert=True)
+    if query.from_user.id != state["user_id"] and not await CustomFilters.sudo("", query):
         return await query.answer(text="This task is not for you!", show_alert=True)
-    elif data[3] == "sdone":
-        bot_cache[msg_id][2] = True
-        return
-    elif data[3] == "scancel":
-        bot_cache[msg_id][3] = True
-        return
+    if state["finished"].is_set():
+        return await query.answer(text="This picker has expired.", show_alert=True)
+    if action in ("done", "cancel"):
+        state["cancelled"] = action == "cancel"
+        if state["selected"] is None:
+            state["selected"] = 0
+        state["finished"].set()
+        return await query.answer()
+    if not (
+        action.isascii() and action.isdecimal() and int(action) < len(state["categories"])
+    ):
+        return await query.answer(text="Invalid category.", show_alert=True)
+    state["selected"] = int(action)
     await query.answer()
-    dcats = fetch_drive_cat(user_id)
-    default_id = user_data.get(user_id, {}).get("GDRIVE_ID") or Config.GDRIVE_ID
-    default_index = user_data.get(user_id, {}).get("INDEX_URL") or Config.INDEX_URL
-    merged_dict = {
-        "Default": {"drive_id": default_id, "index_link": default_index},
-        **dcats,
-        **categories_dict,
-    }
-    cat_name = data[3].replace("_", " ")
-    bot_cache[msg_id][0] = merged_dict[cat_name].get("drive_id")
-    bot_cache[msg_id][1] = merged_dict[cat_name].get("index_link")
-    buttons = ButtonMaker()
-    for _name in merged_dict:
-        buttons.data_button(
-            f'{"✓️" if cat_name == _name else ""} {_name}',
-            f"scat {user_id} {msg_id} {_name.replace(' ', '_')}",
-        )
-    buttons.data_button(
-        "Cancel", f"scat {user_id} {msg_id} scancel", "footer", style=ButtonStyle.DANGER
-    )
-    buttons.data_button(
-        f"Done ({get_readable_time(60 - (time() - bot_cache[msg_id][4]))})",
-        f"scat {user_id} {msg_id} sdone",
-        "footer",
-        style=ButtonStyle.SUCCESS,
-    )
-    await edit_message(
-        query.message,
-        f"<b>Select the category where you want to upload</b>\n\n"
-        f"<i><b>Upload Category:</b></i> <code>{cat_name}</code>\n\n"
-        f"<b>Timeout:</b> 60 sec",
-        buttons.build_menu(3),
-    )
+    if not state["finished"].is_set():
+        await edit_message(query.message, *drive_category_prompt(picker_id, state))
 
 

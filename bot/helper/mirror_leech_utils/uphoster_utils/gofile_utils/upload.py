@@ -1,5 +1,5 @@
 from io import BufferedReader
-from json import JSONDecodeError
+from json import loads
 from logging import getLogger
 from os import path as ospath
 from os import walk as oswalk
@@ -8,13 +8,15 @@ from random import choice
 
 from aiofiles.os import path as aiopath
 from aiohttp import ClientSession, FormData
-from aiohttp.client_exceptions import ContentTypeError
 from tenacity import (
     RetryError,
     retry,
-    retry_if_exception_type,
+    retry_if_exception,
     stop_after_attempt,
     wait_exponential,
+)
+from bot.helper.ext_utils.go_bridge import (
+    cancel_hoster, hoster_receipt, retry_hoster_error, upload_hoster,
 )
 
 from bot.core.config_manager import Config
@@ -159,9 +161,19 @@ class GoFileUpload:
     @retry(
         wait=wait_exponential(multiplier=2, min=4, max=8),
         stop=stop_after_attempt(3),
-        retry=retry_if_exception_type(Exception),
+        retry=retry_if_exception(retry_hoster_error),
     )
     async def upload_aiohttp(self, url, file_path, req_file, data):
+        filename = ospath.basename(file_path).replace(" ", ".")
+        result = await upload_hoster(
+            "gofile", url, file_path, self, self.__progress_callback,
+            field=req_file, filename=filename, fields=data,
+        )
+        if result is not None:
+            with hoster_receipt(result["code"]):
+                if result["code"] == 200:
+                    return loads(result["text"])
+                raise Exception(f"HTTP {result['code']}: {result['text']}")
         with ProgressFileReader(
             filename=file_path, read_callback=self.__progress_callback
         ) as file:
@@ -171,24 +183,13 @@ class GoFileUpload:
             form.add_field(
                 req_file,
                 file,
-                filename=ospath.basename(file_path).replace(" ", "."),
+                filename=filename,
             )
             async with ClientSession() as session:
                 async with session.post(url, data=form) as resp:
-                    if resp.status == 200:
-                        try:
-                            return await resp.json()
-                        except ContentTypeError:
-                            return {
-                                "status": "ok",
-                                "data": {"downloadPage": "Uploaded"},
-                            }
-                        except JSONDecodeError:
-                            return {
-                                "status": "ok",
-                                "data": {"downloadPage": "Uploaded"},
-                            }
-                    else:
+                    with hoster_receipt(resp.status):
+                        if resp.status == 200:
+                            return await resp.json(content_type=None)
                         raise Exception(f"HTTP {resp.status}: {await resp.text()}")
         return None
 
@@ -401,6 +402,7 @@ class GoFileUpload:
 
     async def cancel_task(self):
         self.listener.is_cancelled = True
+        await cancel_hoster(self)
         if self.is_uploading:
             LOGGER.info(f"Cancelling GoFile Upload: {self.listener.name}")
             await self.listener.on_upload_error("GoFile upload has been cancelled!")

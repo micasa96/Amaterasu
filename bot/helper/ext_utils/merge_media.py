@@ -282,6 +282,11 @@ def validate_merge_encode_profile(profile):
     """Reject profile features the single-timeline command cannot honor."""
     if not isinstance(profile, dict):
         return "A merge encode profile is required."
+    if profile.get("container") not in (None, "auto", "mkv"):
+        return "Merge encoding outputs MKV. Choose Auto or MKV in the profile."
+    # shortcut: 5fish runs for individual encodes, add it here when timeline encoding is verified.
+    if profile.get("svtav1_variant") == "5fish":
+        return "SVT-AV1 (5fish · Anime) is available for individual encodes only."
     video = profile.get("video_params") or {}
     if (
         profile.get("subtitle_mode", "copy") != "copy"

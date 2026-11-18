@@ -10,9 +10,12 @@ from aiohttp import ClientSession
 from tenacity import (
     RetryError,
     retry,
-    retry_if_exception_type,
+    retry_if_exception,
     stop_after_attempt,
     wait_exponential,
+)
+from bot.helper.ext_utils.go_bridge import (
+    cancel_hoster, hoster_receipt, retry_hoster_error, upload_hoster,
 )
 
 from bot.core.config_manager import Config
@@ -171,18 +174,27 @@ class BuzzHeavierUpload:
     @retry(
         wait=wait_exponential(multiplier=2, min=4, max=8),
         stop=stop_after_attempt(3),
-        retry=retry_if_exception_type(Exception),
+        retry=retry_if_exception(retry_hoster_error),
     )
     async def upload_aiohttp(self, url, file_path):
         headers = {"Authorization": f"Bearer {self.token}"}
+        result = await upload_hoster(
+            "buzzheavier", url, file_path, self, self.__progress_callback,
+            authorization=headers["Authorization"],
+        )
+        if result is not None:
+            with hoster_receipt(result["code"]):
+                if result["code"] in (200, 201):
+                    return await self.__resp_handler(result["text"])
+                raise Exception(f"HTTP {result['code']}: {result['text']}")
         with ProgressFileReader(
             filename=file_path, read_callback=self.__progress_callback
         ) as file:
             async with ClientSession() as session:
                 async with session.put(url, data=file, headers=headers) as resp:
-                    if resp.status in [200, 201]:
-                        return await self.__resp_handler(await resp.text())
-                    else:
+                    with hoster_receipt(resp.status):
+                        if resp.status in (200, 201):
+                            return await self.__resp_handler(await resp.text())
                         raise Exception(f"HTTP {resp.status}: {await resp.text()}")
         return None
 
@@ -357,6 +369,7 @@ class BuzzHeavierUpload:
 
     async def cancel_task(self):
         self.listener.is_cancelled = True
+        await cancel_hoster(self)
         if self.is_uploading:
             LOGGER.info(f"Cancelling BuzzHeavier Upload: {self.listener.name}")
             await self.listener.on_upload_error(

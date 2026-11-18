@@ -1,0 +1,4 @@
+{% extends "base.html" %}
+{% block title %}Sign in — Amaterasu{% endblock %}
+{% block page %}login{% endblock %}
+{% block page_data %}{{ {"error": error or ""}|tojson }}{% endblock %}

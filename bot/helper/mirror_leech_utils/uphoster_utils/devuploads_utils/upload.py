@@ -1,4 +1,5 @@
 from io import BufferedReader
+from json import loads
 from logging import getLogger
 from os import path as ospath
 from os import walk as oswalk
@@ -9,9 +10,12 @@ from aiohttp import ClientSession, FormData
 from tenacity import (
     RetryError,
     retry,
-    retry_if_exception_type,
+    retry_if_exception,
     stop_after_attempt,
     wait_exponential,
+)
+from bot.helper.ext_utils.go_bridge import (
+    cancel_hoster, hoster_receipt, retry_hoster_error, upload_hoster,
 )
 
 from bot.core.config_manager import Config
@@ -106,31 +110,48 @@ class DevUploadsUpload:
     @retry(
         wait=wait_exponential(multiplier=2, min=4, max=8),
         stop=stop_after_attempt(3),
-        retry=retry_if_exception_type(Exception),
+        retry=retry_if_exception(retry_hoster_error),
     )
     async def upload_file(self, path):
         if self.listener.is_cancelled:
             return None
         file_name = ospath.basename(path)
-        with ProgressFileReader(
-            filename=path, read_callback=self.__progress_callback
-        ) as file:
-            data = FormData()
-            data.add_field("sess_id", self._sess_id)
-            data.add_field("utype", "reg")
-            data.add_field("file", file, filename=file_name)
-            async with ClientSession() as session:
-                async with session.post(
-                    self._server_url, data=data, timeout=3600
-                ) as resp:
-                    result = await resp.json(content_type=None)
-        if isinstance(result, list):
-            result = result[0] if result else {}
-        file_code = result.get("file_code")
-        if file_code:
+        fields = {"sess_id": self._sess_id, "utype": "reg"}
+        reply = await upload_hoster(
+            "devuploads", self._server_url, path, self, self.__progress_callback,
+            field="file", filename=file_name, fields=fields,
+        )
+        if reply is not None:
+            status = reply["code"]
+            with hoster_receipt(status):
+                result = loads(reply["text"])
+        else:
+            with ProgressFileReader(
+                filename=path, read_callback=self.__progress_callback
+            ) as file:
+                data = FormData()
+                for name, value in fields.items():
+                    data.add_field(name, value)
+                data.add_field("file", file, filename=file_name)
+                async with ClientSession() as session:
+                    async with session.post(
+                        self._server_url, data=data, timeout=3600
+                    ) as resp:
+                        status = resp.status
+                        with hoster_receipt(status):
+                            result = await resp.json(content_type=None)
+        with hoster_receipt(status):
+            if isinstance(result, list):
+                result = result[0] if result else {}
+            file_code = result.get("file_code")
+            if not file_code:
+                raise Exception(f"DevUploads upload failed: {result.get('message', result)}")
+        try:
             await self.__set_file_folder(file_code)
-            return f"https://devuploads.com/{file_code}"
-        raise Exception(f"DevUploads upload failed: {result.get('message', result)}")
+        except Exception as error:
+            LOGGER.warning("DevUploads file uploaded, but moving it to the requested folder failed (%s)",
+                           type(error).__name__)
+        return f"https://devuploads.com/{file_code}"
 
     async def _upload_dir(self, input_directory):
         links = []
@@ -200,6 +221,7 @@ class DevUploadsUpload:
 
     async def cancel_task(self):
         self.listener.is_cancelled = True
+        await cancel_hoster(self)
         if self.is_uploading:
             LOGGER.info(f"Cancelling DevUploads Upload: {self.listener.name}")
             await self.listener.on_upload_error("DevUploads upload has been cancelled.")

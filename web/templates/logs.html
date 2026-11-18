@@ -1,0 +1,4 @@
+{% extends "base.html" %}
+{% block title %}Live logs — Amaterasu{% endblock %}
+{% block page %}logs{% endblock %}
+{% block page_data %}{{ {"authorized": authorized|default(false), "login_enabled": login_enabled|default(false)}|tojson }}{% endblock %}

@@ -1,11 +1,15 @@
 import ast
 import os.path as ospath
 import re
-from asyncio import gather
+from asyncio import Lock, gather
 from contextlib import suppress
 from fractions import Fraction
 from math import isfinite
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
+
+from pytest import raises
 
 ROOT = Path(__file__).resolve().parents[1]
 MEDIA_UTILS_PATH = ROOT / "bot" / "helper" / "ext_utils" / "media_utils.py"
@@ -35,6 +39,7 @@ def _load_media_helpers(*names):
 
     namespace = {
         "_MATROSKA_EXTENSIONS": {".mkv", ".mka"},
+        "_ENCODE_CONTAINERS": {"mkv", "mp4", "mov", "webm"},
         "_MP4_EXTENSIONS": {".mp4", ".m4v", ".mov"},
         "_MP4_VIDEO_CODECS": {"copy", "libx264", "libx265"},
         "_MP4_AUDIO_CODECS": {"copy", "aac", "ac3", "eac3", "libmp3lame"},
@@ -116,7 +121,7 @@ def _load_ffmpeg_method(name, namespace):
     return namespace[name]
 
 
-def test_encode_container_is_selected_for_codec_compatibility():
+def test_encode_container_is_selected_for_codec_compatibility(tmp_path):
     (get_output_path,) = _load_media_helpers("get_encode_output_path")
 
     assert get_output_path("movie.mp4", "libx264", "aac") == "movie_encoded.mp4"
@@ -125,6 +130,33 @@ def test_encode_container_is_selected_for_codec_compatibility():
     assert get_output_path("movie.mp4", "libx264", "flac") == "movie_encoded.mkv"
     assert get_output_path("movie.avi", "libx264", "aac") == "movie_encoded.mkv"
     assert get_output_path("movie.mkv", "libsvtav1", "libopus") == "movie_encoded.mkv"
+    for container in ("mkv", "mp4", "mov", "webm"):
+        assert get_output_path("movie.mkv", "libx264", "aac", container=container) == (
+            f"movie_encoded.{container}"
+        )
+    first = tmp_path / "movie_encoded.mp4"
+    first.write_bytes(b"first encode")
+    result = get_output_path(str(tmp_path / "movie.mp4"), "libx264", "aac", container="mp4")
+    assert Path(result) == tmp_path / "movie_encoded_2.mp4"
+    assert first.read_bytes() == b"first encode"
+
+
+def test_explicit_output_container_is_normalized_and_checked():
+    *_, normalize = _load_media_helpers(
+        "_bounded_int", "_as_bool", "_parse_codec_params", "normalize_encode_profile"
+    )
+    anime = {"video_codec": "libsvtav1", "svtav1_variant": "5fish", "audio_codec": "libopus"}
+    assert normalize({**anime, "container": " MP4 "})[0]["container"] == "mp4"
+    assert normalize({**anime, "container": "webm"})[0]["container"] == "webm"
+    assert "container" not in normalize({**anime, "container": "auto"})[0]
+    with raises(ValueError, match="output container"):
+        normalize({"container": "../unsupported"})
+    with raises(ValueError, match="MOV requires H.264"):
+        normalize({**anime, "container": "mov"})
+    with raises(ValueError, match="WebM requires Opus"):
+        normalize({**anime, "container": "webm", "audio_codec": "aac"})
+    with raises(ValueError, match="WebM requires AV1"):
+        normalize({"container": "webm", "video_codec": "copy", "audio_codec": "copy", "subtitle_mode": "burn"})
 
 
 def test_merge_stream_signature_ignores_cover_art_and_detects_video_changes():
@@ -434,6 +466,53 @@ def test_existing_av1_profile_is_preserved_and_compiled_efficiently():
     assert "fast-decode=0" in params
     assert "preset=" not in params
     assert "crf=" not in params
+
+
+def test_anime_av1_profile_round_trips_with_fork_specific_defaults():
+    _, _, parse_params, normalize, build_svt = _load_media_helpers(
+        "_bounded_int",
+        "_as_bool",
+        "_parse_codec_params",
+        "normalize_encode_profile",
+        "_build_svtav1_params",
+    )
+    anime, warnings = normalize({
+        "video_codec": "libsvtav1",
+        "svtav1_variant": "5fish",
+        "video_params": {"extra_params": "lineart-psy-bias=5"},
+    })
+    assert warnings == []
+    assert normalize(anime) == (anime, [])
+    assert anime["svtav1_variant"] == "5fish"
+    video = anime["video_params"]
+    assert (video["preset"], video["crf"], video["pix_fmt"]) == (2, 26, "yuv420p10le")
+    params = parse_params(build_svt(video, 2, anime=True))
+    assert params["lineart-psy-bias"] == "5"
+    assert params["texture-psy-bias"] == "3"
+    assert params["fast-decode"] == "0"
+    assert params["keyint"] == "225"
+
+    fast_seek = parse_params(build_svt({**video, "keyint_seconds": 2}, 2, anime=True))
+    assert fast_seek["keyint"] == fast_seek["min-keyint"] == "33"
+    for minimum, expected in (("-1", "33"), ("129", "97"), ("40", "33"), ("0", "0")):
+        params = parse_params(build_svt(
+            {"keyint_seconds": 5, "extra_params": f"lp=14:min-keyint={minimum}"},
+            worker_count=14, frame_rate=20, anime=True,
+        ))
+        assert params["keyint"] == "97"
+        assert params["min-keyint"] == expected
+        assert params["lp"] == "6"
+    assert parse_params(build_svt({"extra_params": "lp=0"}, 2, anime=True))["lp"] == "0"
+
+    standard, _ = normalize({"video_codec": "libsvtav1"})
+    assert "svtav1_variant" not in standard
+    assert "psy-bias" not in build_svt(standard["video_params"], 2)
+    with raises(ValueError, match="requires the SVT-AV1 video codec"):
+        normalize({**anime, "video_codec": "libx264"})
+    with raises(ValueError, match="variant must be 5fish"):
+        normalize({**anime, "svtav1_variant": "5Fish"})
+    oversized, _ = normalize({**anime, "video_params": {"crf": float("inf")}})
+    assert oversized["video_params"]["crf"] == 26
 
 
 def test_copied_audio_av1_uses_pre_upgrade_svt_parameter_semantics():
@@ -1003,7 +1082,7 @@ def test_default_profiles_are_playback_compatible_and_consistent():
     assert defaults["audio_params"]["vbr"] is False
 
 
-def test_encode_pipeline_selects_copy_safe_timestamps_and_validates_before_success():
+async def test_encode_pipeline_selects_copy_safe_timestamps_and_validates_before_success():
     source = MEDIA_UTILS_PATH.read_text(encoding="utf-8")
     tree = ast.parse(source)
     ffmpeg_class = next(
@@ -1038,6 +1117,7 @@ def test_encode_pipeline_selects_copy_safe_timestamps_and_validates_before_succe
     assert '"subtitles="' in method_source
     assert "await self._validate_encoded_media(" in method_source
     assert "await self._repair_copied_audio(" in method_source
+    assert "self._listener.is_cancelled = True" not in method_source
     assert 'a_codec == "copy"' in method_source
     assert "encoded file has no audio stream" in method_source
     assert "output_chapters != source_chapters" in source
@@ -1076,6 +1156,50 @@ def test_encode_pipeline_selects_copy_safe_timestamps_and_validates_before_succe
     assert "The original file was" in proceed_source
     assert "not uploaded as an encoded result" in proceed_source
 
+    # The caller can continue to upload whenever a false result is not cancelled.
+    _, _, _, normalize = _load_media_helpers(
+        "_bounded_int", "_as_bool", "_parse_codec_params", "normalize_encode_profile",
+    )
+    namespace = {
+        "BinConfig": SimpleNamespace(FFMPEG_5FISH_NAME=None),
+        "normalize_encode_profile": normalize,
+    }
+    module = ast.Module(body=[proceed_encode], type_ignores=[])
+    exec(compile(module, "common.py", "exec"), namespace)
+    listener = SimpleNamespace(
+        encode_profile={"video_codec": "libsvtav1", "svtav1_variant": "5fish"},
+        is_cancelled=False,
+        on_download_error=AsyncMock(),
+    )
+    assert await namespace["proceed_encode"](listener, "source.mkv", "gid") is False
+    assert listener.is_cancelled
+    listener.on_download_error.assert_awaited_once()
+    assert listener.on_download_error.await_args.kwargs == {"preserve_download": True}
+    namespace["BinConfig"].FFMPEG_5FISH_NAME = "/opt/amaterasu-5fish/bin/ffmpeg"
+    listener.is_cancelled = False
+    listener.encode_profile["svtav1_variant"] = "5Fish"
+    listener.on_download_error.reset_mock()
+    assert await namespace["proceed_encode"](listener, "source.mkv", "gid") is False
+    assert listener.is_cancelled
+    assert "variant must be 5fish" in listener.on_download_error.await_args.args[0]
+
+    failed_encode = AsyncMock(return_value=False)
+    namespace.update(
+        get_document_type=AsyncMock(return_value=(True, False, False)),
+        FFMpeg=Mock(return_value=SimpleNamespace(encode_video=failed_encode)),
+        FFmpegStatus=Mock(), LOGGER=Mock(), ospath=ospath, task_dict={},
+        task_dict_lock=Lock(), ff_lock=Lock(),
+    )
+    listener = SimpleNamespace(
+        encode_profile={"video_codec": "libsvtav1", "svtav1_variant": "5fish"},
+        encode_metadata={}, is_cancelled=False, is_file=True, mid=1, size=100,
+        proceed_count=0, on_download_error=AsyncMock(),
+    )
+    assert await namespace["proceed_encode"](listener, "source.mkv", "gid") is False
+    failed_encode.assert_awaited_once()
+    assert listener.is_cancelled
+    assert listener.on_download_error.await_args.kwargs == {"preserve_download": True}
+
 
 def test_profile_entry_points_normalize_saved_data_and_default_label_is_dynamic():
     users_settings = (ROOT / "bot" / "modules" / "users_settings.py").read_text(
@@ -1085,10 +1209,10 @@ def test_profile_entry_points_normalize_saved_data_and_default_label_is_dynamic(
     task_listener = (
         ROOT / "bot" / "helper" / "listeners" / "task_listener.py"
     ).read_text(encoding="utf-8")
-    encode_js = (ROOT / "web" / "static" / "js" / "encode.js").read_text(
-        encoding="utf-8"
-    )
-    encode_html = (
+    page_dir = ROOT / "web" / "ui" / "src" / "pages" / "encode-profiles"
+    encode_js = (page_dir / "profile.ts").read_text(encoding="utf-8")
+    encode_html = (page_dir / "Page.svelte").read_text(encoding="utf-8")
+    encode_template = (
         ROOT / "web" / "templates" / "encode_profiles.html"
     ).read_text(encoding="utf-8")
 
@@ -1101,8 +1225,11 @@ def test_profile_entry_points_normalize_saved_data_and_default_label_is_dynamic(
     assert "-fps_mode:v:0" in encode_js
     assert "useAutomaticTimestamps" in encode_js
     assert "svtParts.push(`preset=${profile.video_params.preset}`)" in encode_js
-    assert "part => !part.startsWith('keyint=')" in encode_js
-    assert "if (!useAutomaticTimestamps) cmd += `  -cluster_time_limit 5000 `" in encode_js
-    assert '<option value="yuv420p" selected>' in encode_html
-    assert '<option value="2">2 seconds (Smooth seeking)</option>' in encode_html
-    assert ".profile-card { flex: 0 0 auto;" in encode_html
+    assert "if (isMkv && !useAutomaticTimestamps) cmd += ` -cluster_time_limit 5000`" in encode_js
+    # The editor defaults to 8-bit 4:2:0 and offers the 2-second AV1 seek interval.
+    assert 'pixFmt: "yuv420p",' in encode_js
+    assert '{ value: "2", label: "2 seconds (Smooth seeking)" }' in encode_js
+    # Profiles render as rows that keep their actions instead of shrinking.
+    assert 'class="inset profile-row"' in encode_html
+    assert "{% block page %}encode-profiles{% endblock %}" in encode_template
+    assert not (ROOT / "web" / "static" / "js" / "encode.js").exists()

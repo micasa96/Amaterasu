@@ -447,11 +447,27 @@ async def update_variables():
                 }
 
 
+async def configure_go_stream(*, health=False):
+    if getenv("AMATERASU_GO_SOCKET"):
+        from ..helper.ext_utils.bot_utils import get_web_secret
+        from ..helper.ext_utils.go_bridge import register_go_tokens
+
+        if not await register_go_tokens(Config, health=health, stream={
+            "secret": get_web_secret(), "mongo_uri": Config.DATABASE_URL or "",
+            "partition": TgClient.PARTITION or db_partition_id(Config.BOT_TOKEN.split(":", 1)[0]),
+            "python_port": int(Config.PORT or getenv("PORT", "") or "8080"),
+            "rclone_port": int(Config.RCLONE_SERVE_PORT or 0) if Config.RCLONE_SERVE_URL else 0,
+        }):
+            LOGGER.warning("Go engine health check or token registration failed")
+
+
 async def start_web_server():
     port = str(Config.PORT or getenv("PORT", "") or "8080")
     if not port:
         await cloudflare_tunnel_booter()
         return
+
+    await configure_go_stream(health=True)
 
     access_pwd = getenv("WEB_ACCESS_PASSWORD", "") or Config.WEB_ACCESS_PASSWORD
     if not access_pwd:

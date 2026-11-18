@@ -18,6 +18,7 @@ from asyncio import gather
 from hashlib import md5
 from logging import getLogger
 from os import path as ospath
+from struct import unpack
 
 from aiofiles.os import path as aiopath
 
@@ -42,6 +43,13 @@ def _is_video_file(filename):
     return ext in _VIDEO_EXTENSIONS
 
 
+def opensubtitles_hash(size, head, tail):
+    """OpenSubtitles hash: file size plus the first and last 64 KiB summed
+    as little-endian unsigned 64-bit words, truncated to 64 bits."""
+    words = unpack("<8192Q", head) + unpack("<8192Q", tail)
+    return f"{(size + sum(words)) & 0xFFFFFFFFFFFFFFFF:016x}"
+
+
 async def _compute_file_hash(filepath):
     """Compute OpenSubtitles hash for a file. The hash is based on the
     first and last 64 KB of the file plus the file size. This is the
@@ -51,18 +59,11 @@ async def _compute_file_hash(filepath):
         size = (await aiopath.getsize(filepath)) if await aiopath.exists(filepath) else 0
         if size < 65536 * 2:
             return None, size
-        hash_val = size
         async with aiopen(filepath, "rb") as f:
-            # First 64 KB
-            chunk = await f.read(65536)
-            for byte in chunk:
-                hash_val = (hash_val + byte) & 0xFFFFFFFFFFFFFFFF
-            # Last 64 KB
-            await f.seek(max(0, size - 65536))
-            chunk = await f.read(65536)
-            for byte in chunk:
-                hash_val = (hash_val + byte) & 0xFFFFFFFFFFFFFFFF
-        return f"{hash_val:016x}", size
+            head = await f.read(65536)
+            await f.seek(size - 65536)
+            tail = await f.read(65536)
+        return opensubtitles_hash(size, head, tail), size
     except Exception as e:
         LOGGER.warning(f"Subtitle hash computation failed for {filepath}: {e}")
         return None, 0

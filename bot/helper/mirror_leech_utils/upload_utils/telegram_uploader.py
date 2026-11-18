@@ -1,6 +1,8 @@
 from asyncio import CancelledError, Lock, Semaphore, ensure_future, gather, sleep, wait_for
 from functools import partial
+from hashlib import sha1
 from html import escape as html_escape
+from html import unescape as html_unescape
 from logging import getLogger
 from os import path as ospath
 from os import walk
@@ -75,6 +77,42 @@ async def _call_with_flood_retry(method, *args, **kwargs):
             await sleep(flood.value + 1)
 
 
+class _UploadAbort(Exception):
+    """An upload error that retrying cannot fix (permissions, caption)."""
+
+
+# Telegram rejects these regardless of how often the upload is repeated.
+# Media-type specific restrictions (e.g. CHAT_SEND_VIDEOS_FORBIDDEN) are not
+# listed: the "send as document" fallback can still succeed for those.
+_NON_RETRYABLE_UPLOAD_ERRORS = frozenset(
+    {
+        "MEDIA_CAPTION_TOO_LONG",
+        "CHAT_WRITE_FORBIDDEN",
+        "CHAT_SEND_MEDIA_FORBIDDEN",
+        "CHAT_ADMIN_REQUIRED",
+        "CHAT_RESTRICTED",
+        "CHANNEL_PRIVATE",
+        "PEER_ID_INVALID",
+        "USER_IS_BLOCKED",
+    }
+)
+
+
+def _fit_caption(caption, limit):
+    """Keep an HTML caption within Telegram's visible-length limit.
+
+    Telegram counts the text left after parsing entities. Captions that fit
+    are returned unchanged; longer ones are reduced to escaped plain text so
+    truncation can never leave an unclosed tag behind.
+    """
+    if not caption:
+        return caption
+    plain = html_unescape(re_sub(r"<[^>]+>", "", caption))
+    if len(plain) <= limit:
+        return caption
+    return html_escape(plain[: limit - 1] + "\u2026", quote=False)
+
+
 # WZGram 3.1.0 performs its own rate-aware part dispatch and bounds active
 # transmissions. Allow two files per account to use that native parallelism,
 # while retaining a conservative outer gate and shared SendMedia cooldown to
@@ -142,6 +180,11 @@ class TelegramUploader:
         self._additional_copy_destinations = None
         self._upload_seq = []
         self._msg_to_seq = {}
+        # Paths claimed by in-flight renames, so two files truncated to the
+        # same name cannot overwrite each other during parallel uploads.
+        self._reserved_upload_paths = set()
+        # Files whose media upload was rejected; later attempts use documents.
+        self._force_document_paths = set()
 
     async def _upload_progress(self, current, total):
         if self._listener.is_cancelled:
@@ -496,22 +539,50 @@ class TelegramUploader:
                 ext = ""
             if lsuffix:
                 ext = f"{lsuffix}{ext}"
-            name = name[: 64 - len(ext)]
-            file_ = f"{name}{ext}"
+            name_parts = (name, name[: 64 - len(ext)], ext)
+            file_ = f"{name_parts[1]}{ext}"
         elif lsuffix:
             name, ext = ospath.splitext(file_)
             file_ = f"{name}{lsuffix}{ext}"
+            name_parts = (name, name, f"{lsuffix}{ext}")
+        else:
+            name_parts = None
 
         old_path = ospath.join(dirpath, pre_file_)
         new_path = ospath.join(dirpath, file_)
         if old_path != new_path:
+            if name_parts is None:
+                stem, ext = ospath.splitext(file_)
+                name_parts = (stem, stem, ext)
+            new_path = await self._reserve_upload_path(dirpath, *name_parts)
             await rename(old_path, new_path)
 
         return new_path, cap_mono
 
-    def _get_input_media(self, subkey, key):
+    async def _reserve_upload_path(self, dirpath, family, name, ext):
+        """Claim a rename target no other file or in-flight upload uses.
+
+        The tag is derived from the untruncated name, so every split part of
+        one family receives the same tag and still groups into one album.
+        """
+        async with self._state_lock:
+            candidate = ospath.join(dirpath, f"{name}{ext}")
+            attempt = 0
+            while (
+                candidate in self._reserved_upload_paths
+                or await aiopath.exists(candidate)
+            ):
+                attempt += 1
+                seed = family if attempt == 1 else f"{family}:{attempt}"
+                tag = f"~{sha1(seed.encode()).hexdigest()[:6]}"
+                stem = name[: max(1, 64 - len(ext) - len(tag))]
+                candidate = ospath.join(dirpath, f"{stem}{tag}{ext}")
+            self._reserved_upload_paths.add(candidate)
+            return candidate
+
+    def _get_input_media(self, messages, key):
         rlist = []
-        for msg in self._media_dict[key][subkey]:
+        for msg in messages:
             if key == "videos":
                 input_media = InputMediaVideo(
                     media=msg.video.file_id, caption=msg.caption
@@ -534,12 +605,21 @@ class TelegramUploader:
         ]
         for i in range(0, len(inputs), 10):
             batch = inputs[i : i + 10]
-            if Config.BOT_PM and self._sent_msg.chat.id != self._listener.user_id:
-                await TgClient.bot.send_media_group(
-                    chat_id=self._listener.user_id,
-                    media=batch,
-                    disable_notification=True,
-                )
+            if self._bot_pm and self._sent_msg.chat.id != self._listener.user_id:
+                try:
+                    await _call_with_flood_retry(
+                        TgClient.bot.send_media_group,
+                        chat_id=self._listener.user_id,
+                        media=batch,
+                        disable_notification=True,
+                    )
+                except Exception as err:
+                    # The user may never have started the bot; the screenshots
+                    # still go to the upload chat below.
+                    LOGGER.warning(
+                        "Could not send screenshots to BotPM: %s",
+                        str(err) or repr(err),
+                    )
             self._sent_msg = (
                 await _call_with_flood_retry(
                     self._sent_msg.reply_media_group,
@@ -550,30 +630,47 @@ class TelegramUploader:
             )[-1]
 
     async def _send_media_group(self, subkey, key, msgs):
+        # ``msgs`` stays a list of [chat_id, msg_id] pairs: it is shared with
+        # self._media_dict, and a later flush must still be able to read it.
         old_ids = [(msg[0], msg[1]) for msg in msgs]
-        for index, msg in enumerate(msgs):
-            if self._listener.transmission_mode == "both" or not self._user_session:
-                msgs[index] = await _call_with_flood_retry(
-                    self._listener.client.get_messages,
-                    chat_id=msg[0],
-                    message_ids=msg[1],
-                )
-            else:
-                msgs[index] = await _call_with_flood_retry(
-                    TgClient.user.get_messages, chat_id=msg[0], message_ids=msg[1]
-                )
+        if self._listener.transmission_mode == "both" or not self._user_session:
+            client = self._listener.client
+        else:
+            client = TgClient.user
+        fetched = [
+            await _call_with_flood_retry(
+                client.get_messages, chat_id=chat_id, message_ids=msg_id
+            )
+            for chat_id, msg_id in old_ids
+        ]
+        anchor = fetched[0]
+        # With parallel uploads the first part may reply to a message that an
+        # earlier album has already replaced (and deleted). Reply to a message
+        # that still exists; sending through the anchor keeps the same chat
+        # and forum topic.
+        reply = getattr(anchor, "reply_to_message", None)
+        if reply is not None and not getattr(reply, "empty", False):
+            reply_id = reply.id
+        elif (
+            self._log_msg is not None
+            and getattr(self._log_msg.chat, "id", None) == anchor.chat.id
+        ):
+            reply_id = self._log_msg.id
+        else:
+            reply_id = anchor.id
         msgs_list = await _call_with_flood_retry(
-            msgs[0].reply_to_message.reply_media_group,
-            media=self._get_input_media(subkey, key),
-            reply_parameters=ReplyParameters(message_id=msgs[0].reply_to_message.id),
+            anchor.reply_media_group,
+            media=self._get_input_media(fetched, key),
+            reply_parameters=ReplyParameters(message_id=reply_id),
             disable_notification=True,
         )
-        for msg in msgs:
+        # The album exists now; never send it again from a later flush.
+        self._media_dict[key].pop(subkey, None)
+        for msg in fetched:
             link = f"https://t.me/pm/{msg.chat.id}/{msg.id}" if self._is_private else msg.link
             if link in self._msgs_dict:
                 del self._msgs_dict[link]
             await delete_message(msg)
-        del self._media_dict[key][subkey]
         if self._listener.is_super_chat or self._listener.up_dest or self._is_private:
             for m in msgs_list:
                 link = f"https://t.me/pm/{m.chat.id}/{m.id}" if self._is_private else m.link
@@ -886,6 +983,9 @@ class TelegramUploader:
             path_to_clean = up_path or f_path
             if not self._listener.is_cancelled and await aiopath.exists(path_to_clean):
                 await remove(path_to_clean)
+            if up_path is not None:
+                self._reserved_upload_paths.discard(up_path)
+                self._force_document_paths.discard(up_path)
 
     async def upload(self):
         await self._user_settings()
@@ -904,7 +1004,13 @@ class TelegramUploader:
             if dirpath.strip().endswith("/yt-dlp-thumb"):
                 continue
             if dirpath.strip().endswith("_mltbss"):
-                await self._send_screenshots(dirpath, files)
+                try:
+                    await self._send_screenshots(dirpath, files)
+                except Exception as err:
+                    # Screenshots are optional; never let them hang the task.
+                    LOGGER.error(
+                        "Failed to send screenshots: %s", str(err) or repr(err)
+                    )
                 await rmtree(dirpath, ignore_errors=True)
                 continue
             for file_ in natsorted(files):
@@ -933,7 +1039,16 @@ class TelegramUploader:
                             for key, value in list(self._media_dict.items()):
                                 for subkey, msgs in list(value.items()):
                                     if len(msgs) > 1:
-                                        await self._send_media_group(subkey, key, msgs)
+                                        try:
+                                            await self._send_media_group(
+                                                subkey, key, msgs
+                                            )
+                                        except Exception as err:
+                                            LOGGER.warning(
+                                                "Media group send failed; will "
+                                                "retry at the end of the task: %s",
+                                                str(err) or repr(err),
+                                            )
                     if self._listener.transmission_mode == "both":
                         # Phase 4.8 — use premium-aware split size. If the
                         # bot account has premium (Config.IS_PREMIUM_BOT),
@@ -976,8 +1091,6 @@ class TelegramUploader:
             for result in results:
                 if isinstance(result, Exception):
                     LOGGER.error(f"Upload task error: {result}")
-            if self._log_msg and getattr(Config, "CLEAN_LOG_MSG", False):
-                await delete_message(self._log_msg)
             await sleep(1)
         for key, value in list(self._media_dict.items()):
             for subkey, msgs in list(value.items()):
@@ -985,9 +1098,16 @@ class TelegramUploader:
                     try:
                         await self._send_media_group(subkey, key, msgs)
                     except Exception as e:
-                        LOGGER.info(
+                        LOGGER.warning(
                             f"While sending media group at the end of task. Error: {e}"
                         )
+        # Albums may reply to the log message, so delete it only afterwards.
+        if (
+            self._upload_tasks
+            and self._log_msg
+            and getattr(Config, "CLEAN_LOG_MSG", False)
+        ):
+            await delete_message(self._log_msg)
         if self._upload_seq:
             src_chat = self._listener.message.chat
             await self._sequence_copies(src_chat)
@@ -1179,7 +1299,9 @@ class TelegramUploader:
         stop=stop_after_attempt(3),
         retry=(
             retry_if_exception_type(Exception)
-            & retry_if_not_exception_type((StopTransmission, CancelledError))
+            & retry_if_not_exception_type(
+                (StopTransmission, CancelledError, _UploadAbort)
+            )
         ),
     )
     async def _upload_file(
@@ -1198,6 +1320,11 @@ class TelegramUploader:
         await self._reset_upload_attempt(o_path)
         file = file_
         self._user_session = user_session
+        # A media upload rejected by Telegram is retried as a document by the
+        # outer retry, rather than by a nested retry inside this attempt.
+        force_document = force_document or o_path in self._force_document_paths
+        caption_limit = 2048 if user_session and TgClient.IS_PREMIUM_USER else 1024
+        cap_mono = _fit_caption(cap_mono, caption_limit)
         is_video, is_audio, is_image = await get_document_type(o_path)
         if self._sent_msg is None:
             LOGGER.error("Cannot upload: _sent_msg is None")
@@ -1233,6 +1360,9 @@ class TelegramUploader:
             thumb = self._thumb
         self._is_corrupted = False
         key = None
+        # Generated thumbnails are written to DOWNLOAD_DIR/thumbnails, outside
+        # the task folder; remove them once this attempt is over.
+        generated_thumbs = []
         try:
             if self._hu is None:
                 self._hu = HypertgUpload(self)
@@ -1272,6 +1402,7 @@ class TelegramUploader:
                         get_audio_thumbnail(o_path),
                         "Telegram audio thumbnail extraction",
                     )
+                    generated_thumbs.append(thumb)
 
             if telegraph_task is not None:
                 telegraph_url = await telegraph_task
@@ -1299,6 +1430,7 @@ class TelegramUploader:
                         get_video_thumbnail(o_path, None),
                         "Telegram video thumbnail extraction",
                     )
+                    generated_thumbs.append(thumb)
 
                 if self._listener.is_cancelled:
                     return
@@ -1325,11 +1457,13 @@ class TelegramUploader:
                         ),
                         "Telegram thumbnail layout generation",
                     )
+                    generated_thumbs.append(thumb)
                 if thumb is None:
                     thumb = await self._optional_upload_metadata(
                         get_video_thumbnail(o_path, duration),
                         "Telegram video thumbnail extraction",
                     )
+                    generated_thumbs.append(thumb)
                 if thumb is not None and thumb != "none":
                     with Image.open(thumb) as img:
                         width, height = img.size
@@ -1415,7 +1549,17 @@ class TelegramUploader:
                         ]
                     msgs = self._media_dict[key][pname]
                     if len(msgs) == 10:
-                        await self._send_media_group(pname, key, msgs)
+                        try:
+                            await self._send_media_group(pname, key, msgs)
+                        except Exception as err:
+                            # The part itself was uploaded; retrying here
+                            # would upload it again. Leave the album to the
+                            # end-of-task flush.
+                            LOGGER.warning(
+                                "Media group send failed; will retry at the "
+                                "end of the task: %s",
+                                str(err) or repr(err),
+                            )
                     else:
                         self._last_msg_in_group = True
 
@@ -1452,13 +1596,25 @@ class TelegramUploader:
                 await remove(thumb)
             err_type = "RPCError: " if isinstance(err, RPCError) else ""
             err_msg = str(err) or repr(err)
+            if getattr(err, "ID", None) in _NON_RETRYABLE_UPLOAD_ERRORS:
+                LOGGER.error(f"{err_type}{err_msg}. Not retrying. Path: {o_path}")
+                raise _UploadAbort(f"{err_type}{err_msg}") from err
             LOGGER.warning(f"{err_type}{err_msg}. Retrying upload. Path: {o_path}")
             if isinstance(err, BadRequest) and key != "documents":
                 LOGGER.error(f"Retrying as document. Path: {o_path}")
-                return await self._upload_file(
-                    cap_mono, o_path, file_, seq_idx, True, user_session
-                )
+                self._force_document_paths.add(o_path)
             raise err
+        finally:
+            for generated in generated_thumbs:
+                if (
+                    generated
+                    and generated != "none"
+                    and await aiopath.exists(generated)
+                ):
+                    try:
+                        await remove(generated)
+                    except OSError:
+                        pass
 
     @property
     def speed(self):

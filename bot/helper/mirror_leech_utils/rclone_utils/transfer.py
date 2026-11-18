@@ -1,4 +1,4 @@
-from asyncio import create_subprocess_exec, gather, sleep, wait_for
+from asyncio import create_subprocess_exec, gather, wait_for
 from asyncio.subprocess import PIPE
 from configparser import RawConfigParser
 from json import loads
@@ -85,7 +85,8 @@ class RcloneTransferHelper:
                     self._speed,
                     self._eta,
                 ) = data[0]
-            await sleep(0.05)
+            # readline() already blocks until output arrives; sleeping per line
+            # would let rclone's stats output back up behind the reader.
 
     def _switch_service_account(self):
         if self._sa_index == self._sa_number - 1:

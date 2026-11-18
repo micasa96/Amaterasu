@@ -1,4 +1,8 @@
-document.addEventListener("DOMContentLoaded", () => {
+// Vanilla controller for the Svelte player page (web/ui/src/pages/player).
+// The page renders the markup (same element IDs), sets
+// window.AMATERASU_PLAYER, installs window.lucide and then loads this file,
+// usually after DOMContentLoaded — so start immediately when the DOM is ready.
+function initAmaterasuPlayer() {
   try {
     const config = window.AMATERASU_PLAYER || {};
     const FILE_URL = config.fileUrl || "";
@@ -17,11 +21,11 @@ document.addEventListener("DOMContentLoaded", () => {
     if (mainDownload) mainDownload.href = absoluteDownloadUrl;
 
     function showToast(message, icon = "info", duration = 2500) {
-      const stack = document.getElementById("player-toasts") || document.getElementById("bs-toast-container");
+      const stack = document.getElementById("player-toasts");
       if (!stack) return;
-      if (stack.id === "player-toasts") stack.replaceChildren();
+      stack.replaceChildren();
       const toast = document.createElement("div");
-      toast.className = stack.id === "player-toasts" ? "am-toast" : "bs-toast bs-toast--info";
+      toast.className = "am-toast";
       toast.innerHTML = `<i data-lucide="${icon}"></i><span></span>`;
       toast.querySelector("span").textContent = message;
       stack.appendChild(toast);
@@ -1349,4 +1353,10 @@ document.addEventListener("DOMContentLoaded", () => {
   } catch (error) {
     console.error("[Amaterasu Player]", error);
   }
-});
+}
+
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", initAmaterasuPlayer, { once: true });
+} else {
+  initAmaterasuPlayer();
+}

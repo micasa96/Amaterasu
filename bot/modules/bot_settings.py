@@ -161,7 +161,20 @@ async def _remove_helper_bot(reference):
         await database.update_config(changes)
         for key, value in changes.items():
             Config.set(key, value)
+        from ..helper.ext_utils.go_bridge import register_go_tokens
+
+        await register_go_tokens(Config)
         return True
+
+
+async def _refresh_go_tokens(key):
+    if key in (
+        "BOT_TOKEN", "TELEGRAM_API", "TELEGRAM_HASH", "HELPER_TOKENS",
+        "HELPER_BOT_PROXIES", "TG_PROXY", "USE_HELPER_BOTS_FOR_FILETOLINK",
+    ) or key.startswith("MULTI_TOKEN"):
+        from ..helper.ext_utils.go_bridge import register_go_tokens
+
+        await register_go_tokens(Config)
 
 
 def _config_update_payload(key, value):
@@ -1307,6 +1320,7 @@ async def edit_variable(_, message, pre_message, key):
     await update_buttons(pre_message, key, "editvar", False)
     await delete_message(message)
     await database.update_config(_config_update_payload(key, value))
+    await _refresh_go_tokens(key)
     if key == "CMD_SUFFIX" and Config.SET_COMMANDS:
         from ..helper.telegram_helper.command_sync import sync_bot_commands
 
@@ -1359,6 +1373,7 @@ async def toggle_bool_var(_, query, pre_message, key, value):
     Config.set(key, bool_value)
     await update_buttons(pre_message, key, "editvar", False)
     await database.update_config(_config_update_payload(key, bool_value))
+    await _refresh_go_tokens(key)
     if key == "SET_COMMANDS":
 
         async def report_result(text):
@@ -1912,6 +1927,7 @@ async def edit_bot_settings(client, query):
         if data[2] == "DATABASE_URL":
             await database.disconnect()
         await database.update_config(_config_update_payload(data[2], value))
+        await _refresh_go_tokens(data[2])
         if data[2] == "SET_COMMANDS" and value:
             from ..helper.telegram_helper.command_sync import sync_bot_commands
 

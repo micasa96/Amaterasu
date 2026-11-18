@@ -44,4 +44,27 @@ print('[startup] config.py converted to UTF-8 via Python fallback.')
 fi
 
 python3 update.py
+export USE_GO_ENGINE="${USE_GO_ENGINE-true}"
+case "${USE_GO_ENGINE,,}" in
+    1|true|yes|on)
+        if command -v amaterasu-go >/dev/null 2>&1 && socket_dir="$(mktemp -d)"; then
+            export AMATERASU_GO_SOCKET="$socket_dir/engine.sock"
+            amaterasu-go --sock "$AMATERASU_GO_SOCKET" --stream-port "${AMATERASU_GO_STREAM_PORT:-8081}" &
+            go_pid=$!
+            python3 -m bot &
+            bot_pid=$!
+            trap 'kill -TERM "$bot_pid" 2>/dev/null || true' TERM INT
+            wait "$bot_pid"
+            status=$?
+            if kill -0 "$bot_pid" 2>/dev/null; then
+                wait "$bot_pid"
+                status=$?
+            fi
+            kill -TERM "$go_pid" 2>/dev/null || true
+            wait "$go_pid" 2>/dev/null || true
+            rmdir "$socket_dir" 2>/dev/null || true
+            exit "$status"
+        fi
+        ;;
+esac
 exec python3 -m bot

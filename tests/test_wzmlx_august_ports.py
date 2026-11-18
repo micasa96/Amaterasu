@@ -285,12 +285,14 @@ def test_new_hoster_routes_and_amaterasu_selector_features_remain_available(
     assert callable(dlg.hubcloud)
     assert callable(dlg.gdflix)
 
-    selector = source("web/templates/page.html")
+    # The selector is the Svelte page web/ui/src/pages/files (page.html hosts it).
+    assert '{% block page %}files{% endblock %}' in source("web/templates/page.html")
+    selector = source("web/ui/src/pages/files/Page.svelte")
     assert 'id="fileSearch"' in selector
-    assert 'id="sortNameBtn"' in selector
-    assert 'id="sortSizeBtn"' in selector
-    assert 'id="selectEverythingBtn"' in selector
-    assert "event.shiftKey" in selector
+    assert 'onclick={() => setSort("name")}' in selector
+    assert 'onclick={() => setSort("size")}' in selector
+    assert "function selectEverything()" in selector
+    assert "e.shiftKey" in selector
 
 
 def test_safety_ports_are_wired_to_the_existing_amaterasu_paths():
@@ -305,7 +307,9 @@ def test_safety_ports_are_wired_to_the_existing_amaterasu_paths():
     direct_links = source(
         "bot/helper/mirror_leech_utils/download_utils/direct_link_generator.py"
     )
-    selector = source("web/templates/page.html")
+    selector = source("web/ui/src/pages/files/tree.ts") + source(
+        "web/ui/src/pages/files/Page.svelte"
+    )
 
     assert "Config.DISABLE_MIRROR and not self.is_uphoster" in mirror
     assert "await _remove_job(nzo_id)" in nzb
@@ -318,6 +322,6 @@ def test_safety_ports_are_wired_to_the_existing_amaterasu_paths():
     assert 'if data[2] == "USENET_SERVERS":' in bot_settings
     assert "remove(output_path)" in drive_download
     assert direct_links.count("timeout=20") >= 8
-    assert "function sortNodes(nodes)" in selector
-    assert "return sortNodes(nodes);" in selector
-    assert "? !areAllChildrenSelected(node)" in selector
+    assert "export function sortNodes(nodes: FileNode[]" in selector
+    assert "if (a.type !== b.type) return a.type === \"folder\" ? -1 : 1;" in selector
+    assert '? !allSelected(node)' in selector

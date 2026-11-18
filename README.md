@@ -5,13 +5,13 @@
 **The Absolute Pinnacle of Telegram Mirroring and Leeching**
 
 <p align="center">
-  <a href="#"><img src="https://img.shields.io/badge/Version-1.6.7-orange?style=for-the-badge&logo=rocket"></a>
-  <a href="#"><img src="https://img.shields.io/github/repo-size/Zan-getsu/Amaterasu?color=FF4500&label=Size&style=for-the-badge"></a>
-  <a href="#"><img src="https://img.shields.io/github/license/Zan-getsu/Amaterasu?style=for-the-badge&color=FF8C00"></a>
+  <a href="#"><img src="https://img.shields.io/badge/Version-1.7.0-orange?style=for-the-badge&logo=rocket"></a>
+  <a href="#"><img src="https://img.shields.io/github/repo-size/its-niloy/Amaterasu?color=FF4500&label=Size&style=for-the-badge"></a>
+  <a href="#"><img src="https://img.shields.io/github/license/its-niloy/Amaterasu?style=for-the-badge&color=FF8C00"></a>
   <br>
   <a href="#"><img src="https://img.shields.io/badge/Powered%20By-Python_3.11-blue?style=for-the-badge&logo=python"></a>
   <a href="#"><img src="https://img.shields.io/badge/Deployed_Via-Docker-2496ED?style=for-the-badge&logo=docker"></a>
-  <a href="#"><img src="https://img.shields.io/badge/Framework-WZGram_3.1.5-green?style=for-the-badge&logo=telegram"></a>
+  <a href="#"><img src="https://img.shields.io/badge/Framework-WZGram_3.1.7-green?style=for-the-badge&logo=telegram"></a>
 </p>
 
 [**Telegram Channel**](#) • [**Support Group**](#) • [**Report a Bug**](#)
@@ -191,7 +191,7 @@ graph TD
 | Component | Technology |
 |---|---|
 | Language | Python 3.11 |
-| Telegram Framework | WZGram 3.1.5 (`pyrogram` API) |
+| Telegram Framework | WZGram 3.1.7 (`pyrogram` API) |
 | Web Server | FastAPI + Uvicorn |
 | Database | MongoDB (Motor async driver) |
 | Containerization | Docker / Podman |
@@ -271,7 +271,7 @@ Connect to your VPS and install the container runtime of your choice:
 
 ```bash
 # Clone the repository
-git clone https://github.com/Zan-getsu/Amaterasu.git && cd Amaterasu
+git clone https://github.com/its-niloy/Amaterasu.git && cd Amaterasu
 
 
 # Create your config file from the sample
@@ -364,6 +364,20 @@ The `docker-compose.yml` is pre-configured with:
 - **`restart: always`** — auto-restarts on crash or server reboot.
 - **Volume mount** (`.:/usr/src/app:z`) — your local `config.py`, `token.pickle`, etc. are live-synced into the container.
 - **Safe update default** (`AUTO_UPDATE=false`) — container startup does not modify the bind-mounted Git checkout. Compose passes `AUTO_UPDATE` through only when it is explicitly set, so an unset environment does not override `config.py` or the System & Automation setting saved in MongoDB. The entry in `.env.example` is intentionally commented; uncomment it only when an environment-level override is desired.
+
+For a local hybrid build, build the native base first, then build the bot from it:
+
+```bash
+docker build -f Dockerfile.base -t amaterasu-base:local .
+AMATERASU_BASE_IMAGE=amaterasu-base:local docker compose -f docker-compose.dev.yml build amaterasu
+```
+
+The Rust extension is inherited from the base image. Set `USE_RUST_CORE=false` to
+use the Python paths. The Go engine is enabled by default. Set
+`USE_GO_ENGINE=false` in the Compose environment to disable it. It communicates
+over a private Unix socket. FileToLink keeps its
+public routes and signed links, and falls back before sending any media if the
+engine is unavailable. Telegram user sessions and proxied clients use WZGram.
 
 #### Method B: Docker (Manual)
 
@@ -941,7 +955,7 @@ For an additional layer of protection on the web UI itself (beyond the file-down
 
 | Variable | Type | Default | Description |
 |---|---|---|---|
-| `UPSTREAM_REPO` | `str` | `https://github.com/Zan-getsu/Amaterasu` | Git repo URL for auto-update. Empty disables auto-update |
+| `UPSTREAM_REPO` | `str` | `https://github.com/its-niloy/Amaterasu` | Git repo URL for auto-update. Empty disables auto-update |
 | `UPSTREAM_BRANCH` | `str` | `"main"` | Branch to track |
 | `AUTO_UPDATE` | `bool` | `False` | Opt in to Git updates. A clean matching branch is fast-forwarded; dirty, ahead, detached, or diverged repositories are skipped without changing files |
 | `UPDATE_PKGS` | `bool` | `False` | Run `uv pip install -U -r requirements.txt` on every boot. Off by default to avoid surprises — pin and update explicitly |
@@ -994,7 +1008,7 @@ Each pattern is a Python regex. Invalid patterns are skipped with a warning. If 
 | `DISABLE_BULK` | `bool` | `False` | Disable bulk download feature |
 | `DISABLE_MULTI` | `bool` | `False` | Disable multi-link feature |
 | `DISABLE_FF_MODE` | `bool` | `False` | Disable FFmpeg processing |
-| `UPSTREAM_REPO` | `str` | `https://github.com/Zan-getsu/Amaterasu` | Repository URL used only when `AUTO_UPDATE=true`. Allowed hosts: `github.com`, `raw.githubusercontent.com`, `git.nbmirror.qzz.io` |
+| `UPSTREAM_REPO` | `str` | `https://github.com/its-niloy/Amaterasu` | Repository URL used only when `AUTO_UPDATE=true`. Allowed hosts: `github.com`, `raw.githubusercontent.com`, `git.nbmirror.qzz.io` |
 | `UPSTREAM_BRANCH` | `str` | `main` | Branch eligible for a safe fast-forward update |
 | `AUTO_UPDATE` | `bool` | `False` | Opt in to safe, clean-tree-only Git updates on boot or bot restart |
 | `UPDATE_PKGS` | `bool` | `False` | Auto-update pip packages on restart |
@@ -1344,11 +1358,22 @@ not safely compatible with the source container. Every completed encode is
 probed and seek-decoded at multiple timestamps before the source is removed. If
 that validation fails, the invalid output is deleted and the source is kept.
 
-SVT-AV1 profiles use FFmpeg's native CRF and preset controls, stay within the
+The Profile Creator starts with **Output container**. Choose **Auto** to keep
+automatic selection, or save `"container": "mkv"`, `"mp4"`, `"mov"`, or `"webm"`
+in the profile. Choose MKV to keep ASS subtitles and attached fonts. Copied
+streams must be compatible with the chosen container. Continuous merge encoding
+uses MKV and accepts Auto or MKV profiles.
+
+Standard SVT-AV1 profiles use FFmpeg's native CRF and preset controls, stay within the
 bot's assigned CPU set, and default to preset `6`, a ten-second seek interval,
 and fast-decode bitstreams. Existing profiles remain compatible: legacy
 `extra_params` such as film grain, `tune`, and explicit `keyint` values are
 preserved, while named profile fields remain authoritative for CRF and preset.
+
+For anime, select **AV1 (SVT-AV1)** under Video Codec and **SVT-AV1 (5fish · Anime)**
+under SVT-AV1 encoder. The starter settings are 10-bit, preset 2 and CRF 26,
+with line-art and texture bias set to 3. This option requires a base image
+built from the updated `Dockerfile.base` and is available for regular `-en` jobs.
 
 ### 3. Track Mapping & Metadata Injection
 You can dynamically isolate specific audio/subtitle tracks and inject custom metadata (titles, release years, track names) either directly into your **Encode Profile** or on the fly using the `-enmeta` command argument.
@@ -1522,7 +1547,9 @@ The **Video Settings** section is open by default. Here you can configure:
 
 | Setting | Description | UI Element |
 |---|---|---|
+| **Output Container** | Auto, MKV, MP4, MOV, or WebM | Dropdown |
 | **Video Codec** | The encoder to use (`libsvtav1`, `libx265`, `libx264`, or `copy`) | Dropdown |
+| **SVT-AV1 encoder** | Standard or 5fish (Anime) when AV1 is selected | Dropdown |
 | **CRF (Quality)** | Quality level — lower = better quality, larger file. `28-34` is a practical AV1 range. | Slider with live label |
 | **Preset / Speed** | Encoding speed vs compression tradeoff. Slower = smaller files. | Dropdown |
 | **Pixel Format** | Bit depth. `yuv420p10le` recommended for 10-bit AV1/HEVC. | Dropdown |
@@ -2068,6 +2095,8 @@ For multiple consecutive files, reply to the first file and use `/link -i 10` to
 
 Use `/link status` to check the active `BASE_URL`, stream bot pool, current stream loads, and FileToLink cache usage.
 
+The Go sidecar also serves signed `/stream/` and `/dl/` links on `127.0.0.1:8081`. A local reverse proxy can route those paths to Go and leave the rest of the web UI on Python. Go caches MongoDB media metadata for 15 minutes and falls back to Python when it cannot serve a link directly. The Go listener limits requests by the TCP peer IP, so a reverse proxy should apply its own per-viewer limit. Set `AMATERASU_GO_STREAM_PORT` in the bot process environment to change the port or set it to `0` to disable the listener. When Gunicorn or rclone is configured to use the same port, the Go listener yields it.
+
 The web server serves an existing complete cached file immediately when available. Uncached full-file responses populate the cache as their bytes pass through; there is no second background download. Adaptive streaming also caches chunks fetched within the first 4 MiB and final 2 MiB, including for videos larger than the whole-file cache limit. It reuses complete chunks for the same media identity, file size, offset, and request size. Writes are atomic, and a cache failure falls back to Telegram. No extra head/tail reads are started just to warm the cache.
 
 ### Private channel library
@@ -2089,7 +2118,7 @@ The first command scans up to the supplied last post. Public channel post links 
 
 Existing FileToLink playlists now have **Prepare playlist ZIP**. The page checks the files, shows preparation progress, and reveals **Download ZIP** when complete. ZIP64 supports large entries. Completed ZIPs support GET/HEAD, byte ranges, ETags and If-Range, so download managers can pause, resume, and use multiple connections. Creating the same selection reuses its current preparation or completed ZIP. Source media identities and lengths are checked during preparation; a failed or interrupted build releases its reservation and cannot be downloaded as a successful ZIP.
 
-Up to two ZIPs prepare at once, with at most 100 playlist files each. ZIPs, cached full files, and edge chunks share `FILETOLINK_CACHE_TOTAL_MAX_MB` (default **2048 MiB**); ZIPs reserve space before starting, and unexpired ZIPs are not evicted to make room. Allow extra room for ZIP headers. If a playlist exceeds the available budget, use individual downloads or increase the cache budget where disk space permits. Completed ZIPs expire 24 hours after preparation starts and are cleaned on subsequent preparation requests. They can resume after a process restart if the cache files survive; a host rebuild or lost cache requires preparing again. Only completed ZIPs are served, including on Windows. No extra service or runtime dependency is required.
+Up to two ZIPs prepare at once, with at most 100 playlist files each. ZIPs, cached full files, and edge chunks share `FILETOLINK_CACHE_TOTAL_MAX_MB` (default **2048 MiB**). ZIPs reserve space before starting, and unexpired ZIPs keep their space. If a ZIP cannot fit in the cache, **Download ZIP** streams the archive directly. Direct downloads restart from the beginning if interrupted. Cached ZIPs expire 24 hours after preparation starts and can resume after a process restart if the cache files survive. No extra service or runtime dependency is required.
 
 ### Persistent delivery totals
 

@@ -1,4 +1,4 @@
-from asyncio import Semaphore, sleep
+from asyncio import Semaphore, create_task, sleep
 from time import monotonic
 
 from PIL import Image
@@ -10,7 +10,7 @@ try:
 except ImportError:
     FloodPremiumWait = FloodWait
 
-from os import path as ospath
+from os import getenv, path as ospath
 
 from aiofiles.os import path as aiopath
 from aiofiles.os import remove
@@ -63,6 +63,10 @@ class HypertgUpload(HypertgTransfer):
         self._up_file = ospath.basename(file_path)
 
         thumb = user_thumb if user_thumb and user_thumb != "none" else None
+        # Thumbnails generated here live in the shared DOWNLOAD_DIR/thumbnails
+        # folder, outside the task directory, so they must be removed by us.
+        # Caller-supplied, user and yt-dlp thumbnails are never deleted here.
+        generated_thumbs = []
         if media_type is not None:
             key = media_type
         else:
@@ -78,6 +82,7 @@ class HypertgUpload(HypertgTransfer):
                     thumb = thumb_path.replace("/yt-dlp-thumb", "")
                 elif is_audio and not is_video:
                     thumb = await get_audio_thumbnail(file_path)
+                    generated_thumbs.append(thumb)
 
             if (
                 force_document
@@ -87,6 +92,7 @@ class HypertgUpload(HypertgTransfer):
                 key = "documents"
                 if is_video and thumb is None:
                     thumb = await get_video_thumbnail(file_path, None)
+                    generated_thumbs.append(thumb)
             elif is_video:
                 key = "videos"
                 duration = (await get_media_info(file_path))[0]
@@ -96,8 +102,10 @@ class HypertgUpload(HypertgTransfer):
                         self._listener.thumbnail_layout,
                         self._listener.screen_shots,
                     )
+                    generated_thumbs.append(thumb)
                 if thumb is None:
                     thumb = await get_video_thumbnail(file_path, duration)
+                    generated_thumbs.append(thumb)
                 if thumb is not None and thumb != "none":
                     with Image.open(thumb) as img:
                         width, height = img.size
@@ -208,11 +216,12 @@ class HypertgUpload(HypertgTransfer):
                     await remove(legacy_thumb)
                 except Exception:
                     pass
-            if user_thumb is None and thumb is not None and await aiopath.exists(thumb):
-                try:
-                    await remove(thumb)
-                except Exception:
-                    pass
+            for generated in generated_thumbs:
+                if generated and generated != "none" and await aiopath.exists(generated):
+                    try:
+                        await remove(generated)
+                    except Exception:
+                        pass
 
     async def _send_with_retry(self, send_func, **kwargs):
         client = send_func.__self__
@@ -240,7 +249,24 @@ class HypertgUpload(HypertgTransfer):
                 return await self._send_with_retry(client.send_photo, **kwargs)
             return await self._send_with_retry(client.send_document, **kwargs)
 
-        uploaded_token = UPLOADED_FILES.set({})
+        uploaded = {}
+        if getenv("USE_GO_ENGINE", "true").strip().lower() in {"1", "true", "yes", "on"}:
+            from .go_bridge import upload_parts
+
+            filename = kwargs.get(key.rstrip("s"))
+            if filename and any(client is helper for helper in self.clients.values()):
+                async def report(current, total):
+                    await self._progress(current, total, filename)
+
+                transfer = create_task(upload_parts(client, filename, report))
+                self._tasks.append(transfer)
+                try:
+                    file = await transfer
+                finally:
+                    self._tasks.remove(transfer)
+                if file is not None:
+                    uploaded[filename] = file
+        uploaded_token = UPLOADED_FILES.set(uploaded)
         try:
             return await send()
         except PhotoInvalidDimensions:

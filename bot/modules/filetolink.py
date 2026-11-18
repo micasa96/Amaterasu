@@ -359,6 +359,8 @@ async def copy_to_bin(message):
 
 
 async def prepare_stored_media(message):
+    from bot.helper.ext_utils.go_bridge import publish_go_metadata
+
     media = get_media(message)
     bin_channel = Config.effective_bin_channel()
     if bin_channel:
@@ -388,7 +390,15 @@ async def prepare_stored_media(message):
         except Exception as e:
             LOGGER.error(f"Failed to reply to copied message in BIN_CHANNEL: {e}")
             
+        await publish_go_metadata(
+            getattr(copied, "_client", None), bin_channel, copied.id, media,
+            get_filename(copied, media),
+        )
         return bin_channel, copied.id, media
+    await publish_go_metadata(
+        getattr(message, "_client", None), message.chat.id, message.id, media,
+        get_filename(message, media),
+    )
     return message.chat.id, message.id, media
 
 

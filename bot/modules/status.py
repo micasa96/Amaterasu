@@ -28,6 +28,7 @@ from ..helper.telegram_helper.message_utils import (
 )
 from ..helper.telegram_helper.button_build import ButtonMaker
 from .filetolink import build_filetolink_status
+from .live_logs import send_live_logs_link
 
 
 @new_task
@@ -80,6 +81,10 @@ async def get_download_status(download):
 async def status_pages(_, query):
     data = query.data.split()
     key = int(data[1])
+    if data[2] == "logs":
+        # Answers the query itself (alert or confirmation).
+        await send_live_logs_link(_, query)
+        return
     if data[2] in {"fl", "flp"}:
         requested_page = int(data[3]) if data[2] == "flp" and len(data) > 3 else 1
         msg, button = build_filetolink_status(key, page_no=requested_page)

@@ -88,6 +88,13 @@ async def check_running_tasks(listener, state="dl"):
     event = None
     is_over_limit = False
     async with queue_dict_lock:
+        # A retry or fallback (aria2 -> yt-dlp, aria2 error callback) re-enters
+        # here while still holding its slot; counting it against itself would
+        # queue the task behind its own slot forever.
+        if (state == "dl" and listener.mid in non_queued_dl) or (
+            state == "up" and listener.mid in non_queued_up
+        ):
+            return False, None
         if state == "up" and listener.mid in non_queued_dl:
             non_queued_dl.remove(listener.mid)
         if (
@@ -231,7 +238,10 @@ async def limit_checker(listener, yt_playlist=0):
 
     size = listener.size
 
-    async def recurr_limits(limits):
+    async def recurr_limits(limits, first_match_only=False):
+        # first_match_only: the source-type list picks the single limit that
+        # applies to this download (DIRECT_LIMIT is the catch-all), so stop at
+        # the first configured one. Other lists check every configured limit.
         limit_exceeded = ""
         for condition, attr, name in limits:
             if condition and (limit := getattr(Config, attr, 0)):
@@ -243,10 +253,13 @@ async def limit_checker(listener, yt_playlist=0):
                     if size >= byte_limit:
                         limit_exceeded = f"┠ <b>{name} Limit</b> → {get_readable_file_size(byte_limit)}"
 
-                LOGGER.info(
-                    f"{name} Limit Breached: {listener.name} & Size: {get_readable_file_size(size)}"
-                )
-                break
+                if limit_exceeded:
+                    LOGGER.info(
+                        f"{name} Limit Breached: {listener.name} & Size: {get_readable_file_size(size)}"
+                    )
+                    break
+                if first_match_only:
+                    break
         return limit_exceeded
 
     limits = [
@@ -259,10 +272,14 @@ async def limit_checker(listener, yt_playlist=0):
         (listener.is_nzb, "NZB_LIMIT", "SABnzbd"),
         (listener.is_rclone, "RC_DL_LIMIT", "RCloneDL"),
         (listener.is_ytdlp, "YTDLP_LIMIT", "YT-DLP"),
-        (bool(yt_playlist), "PLAYLIST_LIMIT", "Playlist"),
         (True, "DIRECT_LIMIT", "Direct"),
     ]
-    limit_exceeded = await recurr_limits(limits)
+    # The playlist count is independent of the size limit for the source type.
+    limit_exceeded = await recurr_limits(
+        [(bool(yt_playlist), "PLAYLIST_LIMIT", "Playlist")]
+    )
+    if not limit_exceeded:
+        limit_exceeded = await recurr_limits(limits, first_match_only=True)
 
     if not limit_exceeded:
         extra_limits = [

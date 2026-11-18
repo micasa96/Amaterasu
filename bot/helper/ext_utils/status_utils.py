@@ -288,6 +288,8 @@ Each user can get status for their tasks by using: /{BotCommands.StatusCommand[3
         position="header",
         style=ButtonStyle.PRIMARY,
     )
+    # Owner/sudo only; the link is delivered privately (bot/modules/live_logs.py).
+    buttons.data_button("◉ LIVE LOGS", f"status {sid} logs", position="header")
     return msg, buttons.build_menu(h_cols=2)
 
 
@@ -449,6 +451,8 @@ async def get_readable_message(sid, is_user, page_no=1, status="All", page_step=
         position="header",
         style=ButtonStyle.PRIMARY,
     )
+    # Owner/sudo only; the link is delivered privately (bot/modules/live_logs.py).
+    buttons.data_button("◉ LIVE LOGS", f"status {sid} logs", position="header")
     if len(tasks) > STATUS_LIMIT:
         buttons.data_button("❮ PREV", f"status {sid} pre", position="f_body")
         buttons.data_button(

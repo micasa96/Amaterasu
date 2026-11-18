@@ -27,6 +27,7 @@ from PIL import Image
 from ... import DOWNLOAD_DIR, LOGGER, cores, threads
 from ...core.config_manager import BinConfig
 from .bot_utils import cmd_exec, sync_to_async
+from .rust_bridge import probe_document_type
 from .files_utils import get_mime_type, is_archive, is_archive_split
 from .status_utils import time_to_seconds
 
@@ -34,7 +35,7 @@ from .status_utils import time_to_seconds
 def get_md5_hash(up_path):
     md5_hash = md5()
     with open(up_path, "rb") as f:
-        for byte_block in iter(lambda: f.read(4096), b""):
+        for byte_block in iter(lambda: f.read(1024 * 1024), b""):
             md5_hash.update(byte_block)
         return md5_hash.hexdigest()
 
@@ -382,6 +383,12 @@ async def get_document_type(path):
     )
     if mime_type.startswith(non_media_mimes):
         return False, False, False
+    if mime_type in {
+        "video/mp4", "audio/mp4", "video/x-matroska", "audio/x-matroska",
+        "video/webm", "audio/webm",
+    }:
+        if (media_type := await sync_to_async(probe_document_type, path)) is not None:
+            return media_type
     try:
         result = await cmd_exec(
             [
@@ -427,6 +434,7 @@ async def get_document_type(path):
 
 
 _MATROSKA_EXTENSIONS = {".mkv", ".mka"}
+_ENCODE_CONTAINERS = {"mkv", "mp4", "mov", "webm"}
 _MP4_EXTENSIONS = {".mp4", ".m4v", ".mov"}
 _MP4_VIDEO_CODECS = {"copy", "libx264", "libx265"}
 _MP4_AUDIO_CODECS = {"copy", "aac", "ac3", "eac3", "libmp3lame"}
@@ -470,7 +478,7 @@ _PIXEL_FORMATS = {
 def _bounded_int(value, default, minimum, maximum):
     try:
         return max(minimum, min(maximum, int(value)))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
 
 
@@ -494,6 +502,12 @@ def normalize_encode_profile(profile):
     raw = dict(profile) if isinstance(profile, dict) else {}
 
     video_codec = str(raw.get("video_codec") or "libx264").strip().lower()
+    variant = raw.get("svtav1_variant")
+    if variant is not None and (variant != "5fish" or video_codec != "libsvtav1"):
+        raise ValueError("The SVT-AV1 variant must be 5fish and requires the SVT-AV1 video codec.")
+    anime_av1 = variant == "5fish"
+    if variant is None:
+        raw.pop("svtav1_variant", None)
     if video_codec not in _SUPPORTED_VIDEO_CODECS:
         warnings.append(f"unsupported video codec {video_codec!r}; using libx264")
         video_codec = "libx264"
@@ -506,13 +520,34 @@ def normalize_encode_profile(profile):
         warnings.append(f"unsupported subtitle mode {subtitle_mode!r}; using copy")
         subtitle_mode = "copy"
 
+    supplied_container = raw.get("container")
+    container = "auto" if supplied_container is None else str(supplied_container).strip().lower()
+    if container == "auto":
+        raw.pop("container", None)
+    elif container in _ENCODE_CONTAINERS:
+        raw["container"] = container
+    else:
+        raise ValueError("Choose Auto, MKV, MP4, MOV, or WebM as the output container.")
+    if container == "mov":
+        if video_codec not in {"libx264", "libx265", "mpeg4", "copy"}:
+            raise ValueError("MOV requires H.264, H.265, MPEG-4, or compatible copied video.")
+        if audio_codec not in {"aac", "ac3", "libmp3lame", "copy"}:
+            raise ValueError("MOV requires AAC, AC-3, MP3, or compatible copied audio.")
+    if container == "webm":
+        if video_codec not in {"libsvtav1", "libvpx-vp9", "copy"} or (
+            video_codec == "copy" and subtitle_mode == "burn"
+        ):
+            raise ValueError("WebM requires AV1, VP9, or compatible copied video without subtitle burn-in.")
+        if audio_codec not in {"libopus", "copy"}:
+            raise ValueError("WebM requires Opus or compatible copied audio.")
+
     supplied_video = raw.get("video_params")
     supplied_video = supplied_video if isinstance(supplied_video, dict) else {}
     video_params = dict(supplied_video)
     legacy_codec_params = _parse_codec_params(video_params.get("extra_params"))
     crf_max = 63 if video_codec in {"libsvtav1", "libvpx-vp9"} else 51
     crf_default = {
-        "libsvtav1": 30,
+        "libsvtav1": 26 if anime_av1 else 30,
         "libx264": 23,
         "libx265": 24,
         "libvpx-vp9": 30,
@@ -527,7 +562,8 @@ def normalize_encode_profile(profile):
 
     if video_codec == "libsvtav1":
         video_params["preset"] = _bounded_int(
-            video_params.get("preset", legacy_codec_params.get("preset")), 6, 0, 13
+            video_params.get("preset", legacy_codec_params.get("preset")),
+            2 if anime_av1 else 6, 0, 13,
         )
     elif video_codec in {"libx264", "libx265"}:
         preset = str(video_params.get("preset") or "medium").strip().lower()
@@ -609,8 +645,8 @@ def normalize_encode_profile(profile):
         else:
             video_params["level"] = level
 
-    if "fast_decode" in video_params:
-        video_params["fast_decode"] = _as_bool(video_params["fast_decode"], True)
+    if "fast_decode" in video_params or anime_av1:
+        video_params["fast_decode"] = _as_bool(video_params.get("fast_decode"), not anime_av1)
     if "keyint_seconds" in video_params:
         video_params["keyint_seconds"] = _bounded_int(
             video_params["keyint_seconds"], 10, 1, 30
@@ -680,9 +716,12 @@ def _parse_codec_params(params):
 
 
 def _build_svtav1_params(
-    video_params, worker_count, frame_rate=0, compatibility_mode=False
+    video_params, worker_count, frame_rate=0, compatibility_mode=False, anime=False
 ):
     params = _parse_codec_params(video_params.get("extra_params"))
+    if anime:
+        params.setdefault("lineart-psy-bias", "3")
+        params.setdefault("texture-psy-bias", "3")
     for authoritative in ("preset", "crf", "profile", "level"):
         params.pop(authoritative, None)
 
@@ -695,10 +734,10 @@ def _build_svtav1_params(
                 _bounded_int(params["lp"], worker_count, 1, worker_count)
             )
     else:
-        requested_workers = _bounded_int(
-            params.get("lp"), worker_count, 1, worker_count
+        max_parallelism = min(worker_count, 6) if anime else worker_count
+        params["lp"] = str(
+            _bounded_int(params.get("lp"), max_parallelism, 0 if anime else 1, max_parallelism)
         )
-        params["lp"] = str(requested_workers)
 
     explicit_seek_interval = "keyint_seconds" in video_params
     if explicit_seek_interval:
@@ -715,6 +754,18 @@ def _build_svtav1_params(
         seconds = 10
         fps = frame_rate if frame_rate > 0 else 24
         params["keyint"] = str(max(24, min(1800, round(fps * seconds))))
+    if anime and "keyint" in params:
+        # 5fish's anime tuning needs GOP sizes of N * 32 + 1 to avoid bad frames.
+        keyint = max(1, (int(params["keyint"]) + 15) // 32) * 32 + 1
+        params["keyint"] = str(keyint)
+        minimum = params.get("min-keyint", "-1")
+        if minimum == "-1" and keyint < 129:
+            params["min-keyint"] = "33"
+        elif re.fullmatch(r"\+?\d+", minimum):
+            min_frames = _bounded_int(minimum, 33, 0, keyint)
+            if min_frames > 1:
+                min_frames = max(1, (min_frames + 15) // 32) * 32 + 1
+            params["min-keyint"] = str(min_frames)
 
     fast_decode = video_params.get("fast_decode")
     if compatibility_mode:
@@ -770,7 +821,7 @@ def _encode_timestamp_policy(output_path, audio_codec, fps_mode="vfr"):
     }
 
 
-def get_encode_output_path(input_path, codec, audio_codec=None):
+def get_encode_output_path(input_path, codec, audio_codec=None, *, container=None):
     base, ext = ospath.splitext(input_path)
     output_ext = ext
     normalized_ext = ext.lower()
@@ -780,7 +831,9 @@ def get_encode_output_path(input_path, codec, audio_codec=None):
     # placing AV1/Opus/FLAC or copied non-MP4 subtitles in the source extension
     # can mux successfully while producing a file that players cannot seek or
     # decode reliably.
-    if audio_codec is not None and normalized_ext not in _MATROSKA_EXTENSIONS:
+    if container in _ENCODE_CONTAINERS:
+        output_ext = f".{container}"
+    elif audio_codec is not None and normalized_ext not in _MATROSKA_EXTENSIONS:
         mp4_compatible = (
             normalized_ext in _MP4_EXTENSIONS
             and codec in _MP4_VIDEO_CODECS
@@ -789,7 +842,12 @@ def get_encode_output_path(input_path, codec, audio_codec=None):
         if not mp4_compatible:
             output_ext = ".mkv"
 
-    return f"{base}_encoded{output_ext}"
+    output_file = f"{base}_encoded{output_ext}"
+    duplicate = 2
+    while ospath.lexists(output_file):
+        output_file = f"{base}_encoded_{duplicate}{output_ext}"
+        duplicate += 1
+    return output_file
 
 
 def _probe_duration(probe):
@@ -1417,7 +1475,8 @@ class FFMpeg:
                             f"{', '.join(sorted(self._progress_keys))}; "
                             f"duration={self._total_time}; frames={self._total_frames}"
                         )
-            await sleep(0.05)
+            # No per-line sleep: ffmpeg emits ~12 lines per 0.5s progress
+            # block, and a slower reader lets the pipe fill and stalls ffmpeg.
 
     async def ffmpeg_cmds(self, ffmpeg, f_path):
         self.clear()
@@ -1775,9 +1834,19 @@ class FFMpeg:
 
     async def encode_video(self, input_file, profile, metadata=None):
         self.clear()
-        profile, profile_warnings = normalize_encode_profile(profile)
+        try:
+            profile, profile_warnings = normalize_encode_profile(profile)
+        except ValueError as error:
+            LOGGER.error("Invalid encode profile: %s", error)
+            return False
         for warning in profile_warnings:
             LOGGER.warning(f"Encode profile normalized: {warning}")
+
+        anime_av1 = profile.get("svtav1_variant") == "5fish"
+        ffmpeg_binary = BinConfig.FFMPEG_5FISH_NAME if anime_av1 else BinConfig.FFMPEG_NAME
+        if not ffmpeg_binary:
+            LOGGER.error("The SVT-AV1 5fish encoder is unavailable in this image.")
+            return False
 
         source_probe, source_error = await _probe_media_file(input_file)
         if source_probe is None:
@@ -1803,7 +1872,9 @@ class FFMpeg:
             )
             v_codec = "libx264"
 
-        output_file = get_encode_output_path(input_file, v_codec, a_codec)
+        output_file = get_encode_output_path(
+            input_file, v_codec, a_codec, container=profile.get("container")
+        )
 
         # Merge profile metadata with task-specific metadata (task metadata overrides profile)
         prof_meta = profile.get("metadata", {})
@@ -1818,22 +1889,22 @@ class FFMpeg:
             processor = MetadataProcessor()
             enc_meta = await processor.process(enc_meta, input_file)
 
-        if "__internal_rename__" in enc_meta:
-            new_name = enc_meta.pop("__internal_rename__")
-            if new_name:
-                import os
-                ext = os.path.splitext(output_file)[1]
-                new_base, new_ext = os.path.splitext(new_name)
-                if not new_ext:
-                    new_name += ext
-                elif new_ext.lower() != ext.lower():
-                    LOGGER.warning(
-                        f"Encode rename requested {new_ext}, but {ext} is required "
-                        "for the selected codecs; using the safe container."
-                    )
-                    new_name = f"{new_base}{ext}"
-                dirpath = os.path.dirname(output_file)
-                output_file = f"{dirpath}/{new_name}"
+        new_name = enc_meta.pop("__internal_rename__", None)
+        if new_name:
+            ext = ospath.splitext(output_file)[1]
+            new_base, new_ext = ospath.splitext(new_name)
+            if not new_ext:
+                new_name += ext
+            elif new_ext.lower() != ext.lower():
+                LOGGER.warning(
+                    f"Encode rename requested {new_ext}, but {ext} is required "
+                    "for the selected codecs; using the chosen container."
+                )
+                new_name = f"{new_base}{ext}"
+            output_file = f"{ospath.dirname(output_file)}/{new_name}"
+            if ospath.lexists(output_file):
+                LOGGER.error("The requested encode output already exists: %s", output_file)
+                return False
 
         v_track = enc_meta.pop("v_track", "0")
         a_track = enc_meta.pop("a_track", "?")
@@ -1862,7 +1933,7 @@ class FFMpeg:
 
         cmd = [
             "taskset", "-c", f"{cores}",
-            BinConfig.FFMPEG_NAME,
+            ffmpeg_binary,
             "-y", "-nostdin",
             "-hide_banner", "-loglevel", "error", "-progress", "pipe:1",
         ]
@@ -1870,7 +1941,7 @@ class FFMpeg:
             cmd.extend(["-fflags", "+genpts"])
         cmd.extend(["-i", input_file])
 
-        if not is_mkv and hasattr(self._listener, "thumb") and self._listener.thumb:
+        if is_mp4 and hasattr(self._listener, "thumb") and self._listener.thumb:
             cmd.extend(["-i", self._listener.thumb])
 
         def add_map_flags(cmd_list, track_type, track_str):
@@ -1911,7 +1982,7 @@ class FFMpeg:
         if is_mkv:
             cmd.extend(["-map", "0:t?", "-c:t", "copy"])
 
-        if not is_mkv and hasattr(self._listener, "thumb") and self._listener.thumb:
+        if is_mp4 and hasattr(self._listener, "thumb") and self._listener.thumb:
             cmd.extend(["-map", "1", "-c:v:1", "copy", "-disposition:v:1", "attached_pic"])
 
         crf = v_params.get("crf", 30)
@@ -1924,7 +1995,8 @@ class FFMpeg:
         LOGGER.info(
             "Encoding profile applied: "
             f"name={profile.get('name', 'Encoding Profile')!r}, "
-            f"video={v_codec}, audio={a_codec}, crf={crf}, preset={preset}, "
+            f"video={'SVT-AV1 (5fish)' if anime_av1 else v_codec}, "
+            f"audio={a_codec}, crf={crf}, preset={preset}, "
             f"pix_fmt={pix_fmt}, fps_mode={v_params.get('fps_mode', 'vfr')}, "
             f"timestamp_mode={'automatic' if timestamp_policy['automatic_timestamps'] else 'normalized'}, "
             f"subtitles={sub_mode}"
@@ -1932,7 +2004,9 @@ class FFMpeg:
 
         extra_v_params = str(v_params.get("extra_params") or "").strip()
         legacy_av1_copy = (
-            v_codec == "libsvtav1" and timestamp_policy["automatic_timestamps"]
+            v_codec == "libsvtav1"
+            and not anime_av1
+            and timestamp_policy["automatic_timestamps"]
         )
         if v_codec == "libsvtav1":
             svt_params = _build_svtav1_params(
@@ -1940,7 +2014,10 @@ class FFMpeg:
                 max(1, threads),
                 frame_rate,
                 compatibility_mode=legacy_av1_copy,
+                anime=anime_av1,
             )
+            if anime_av1:
+                cmd.extend(["-err_detect:v", "+explode"])
             if legacy_av1_copy:
                 # Preserve the exact pre-upgrade SVT option route for the
                 # Matroska + copied-audio compatibility path.
@@ -2145,18 +2222,15 @@ class FFMpeg:
                 await remove(custom_thumb_path)
                 self._listener.thumb = original_thumb
             return output_file
-        elif code == -9:
-            self._listener.is_cancelled = True
-            if custom_thumb_path:
-                await remove(custom_thumb_path)
-                self._listener.thumb = original_thumb
-            return False
         else:
             try:
                 stderr = stderr.decode().strip()
             except Exception:
                 stderr = "Unable to decode the error!"
-            LOGGER.error(f"{stderr}. Error encoding video. Path: {input_file}")
+            LOGGER.error(
+                "%s. Error encoding video. Path: %s",
+                stderr or f"FFmpeg exited with status {code}", input_file,
+            )
             if await aiopath.exists(output_file):
                 await remove(output_file)
             if custom_thumb_path:
@@ -2314,7 +2388,10 @@ class FFMpeg:
         from .merge_media import merge_copy, merge_encode
 
         if profile is not None:
-            normalized, warnings = normalize_encode_profile(profile)
+            try:
+                normalized, warnings = normalize_encode_profile(profile)
+            except ValueError as error:
+                return False, f"The merge encode profile needs correction: {error}"
             if warnings:
                 return False, f"The merge encode profile needs correction: {warnings[0]}"
             return await merge_encode(

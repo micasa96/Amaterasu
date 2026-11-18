@@ -137,21 +137,35 @@ def test_serialized_pickle_is_downloadable_and_contains_refresh_credentials():
     assert has_refresh_token is True
 
 
+TOKEN_PAGE = ROOT / "web/ui/src/pages/token-generator/Page.svelte"
+
+
 def test_template_has_dual_entry_activation_and_mobile_guards():
     template = (ROOT / "web/templates/token_generator.html").read_text(encoding="utf-8")
+    page = TOKEN_PAGE.read_text(encoding="utf-8")
 
-    assert "Upload credentials.json" in template
-    assert "Enter manually" in template
-    assert 'name="credentials_file"' in template
-    assert 'name="client_id"' in template
-    assert "Use in Amaterasu" in template
-    assert template.index("Download token.pickle") < template.index("Use in Amaterasu")
-    assert "@media (max-width: 980px)" in template
-    assert "@media (max-width: 640px)" in template
-    assert "@media (max-width: 380px)" in template
-    assert "font-size: 16px" in template
-    assert "min-width: 0" in template
-    assert "overflow-x: hidden" in template
+    # The template is a thin host that hands every server value to the page.
+    assert "{% block page %}token-generator{% endblock %}" in template
+    for key in ("user_id", "page_token", "callback_url", "default_scope",
+                "token_status", "error", "success", "activation_success",
+                "refresh_warning"):
+        assert f'"{key}": ' in template
+    assert "Upload credentials.json" in page
+    assert "Enter manually" in page
+    assert 'name="credentials_file"' in page
+    assert 'name="client_id"' in page
+    assert 'name="client_secret"' in page
+    assert 'type="password"' in page
+    assert 'name="auth_method"' in page
+    assert "Use in Amaterasu" in page
+    assert page.index("Download token.pickle") < page.index("Use in Amaterasu")
+    # Responsive guards: the layout collapses, the rail unsticks, phone fields
+    # stay at 16px so iOS does not zoom, and nothing forces sideways scroll.
+    assert "@media (max-width: 64rem)" in page
+    assert "@media (max-width: 40rem)" in page
+    assert "@media (max-width: 24rem)" in page
+    assert "font-size: 1rem" in page
+    assert "minmax(0, 1fr)" in page
 
 
 def test_generation_does_not_replace_the_active_amaterasu_token():
@@ -318,7 +332,7 @@ def test_desktop_flow_uses_loopback_pkce_and_requires_refresh_token(monkeypatch,
 
 
 def test_portal_has_no_separate_desktop_download():
-    template = (ROOT / "web/templates/token_generator.html").read_text(encoding="utf-8")
+    template = TOKEN_PAGE.read_text(encoding="utf-8")
     source = (ROOT / "web/wserver.py").read_text(encoding="utf-8")
     assert "Download desktop generator" not in template
     assert "/api/token-generator/desktop" not in template

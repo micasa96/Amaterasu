@@ -745,6 +745,84 @@ def test_split_helpers_reject_incomplete_output_and_preserve_source_on_failure()
     assert Path(removed[0]).name == "movie.part001.mkv"
 
 
+@pytest.mark.parametrize("scenario", ["complete", "gap", "missing_second", "existing", "write_error", "publish_race"])
+def test_join_files_preserves_unrelated_files_and_incomplete_inputs(tmp_path, scenario):
+    from shutil import copyfileobj
+    from tempfile import TemporaryDirectory
+
+    folder = tmp_path
+    target = folder / "movie.mkv"
+    first = folder / "movie.mkv.001"
+    second = folder / "movie.mkv.002"
+    sidecar = folder / "movie.mkv.nfo"
+    numeric_sidecar = folder / "movie.mkv.2024"
+    parts = {second: b"second", first: b"first"}
+    if scenario == "gap":
+        parts[folder / "movie.mkv.004"] = b"fourth"
+    if scenario == "missing_second":
+        del parts[second]
+        parts[folder / "movie.mkv.003"] = b"third"
+    for path, contents in parts.items():
+        path.write_bytes(contents)
+    sidecar.write_bytes(b"notes")
+    numeric_sidecar.write_bytes(b"other")
+    if scenario == "existing":
+        target.write_bytes(b"existing output")
+
+    def copy_part(source, output, length):
+        if scenario == "write_error" and Path(source.name) == second:
+            raise OSError("disk full")
+        copyfileobj(source, output, length)
+
+    def publish(staged, destination):
+        if scenario == "publish_race":
+            destination.write_bytes(b"existing output")
+        os.link(staged, destination)
+
+    join = load_top_level_functions(
+        FILES_UTILS_SOURCE,
+        {"join_files", "_join_files"},
+        {
+            "LOGGER": logging.getLogger(__name__),
+            "Path": Path,
+            "TemporaryDirectory": TemporaryDirectory,
+            "copyfileobj": copy_part,
+            "fsync": os.fsync,
+            "get_mime_type": lambda _path: "application/octet-stream",
+            "link": publish,
+            "ospath": os.path,
+            "re_search": re.search,
+            "rust_core": lambda: None,
+            "sync_to_async": asyncio.to_thread,
+        },
+    )["join_files"]
+    if scenario == "complete":
+        asyncio.run(join(folder))
+    else:
+        with pytest.raises(OSError):
+            asyncio.run(join(folder))
+
+    assert sidecar.read_bytes() == b"notes"
+    assert numeric_sidecar.read_bytes() == b"other"
+    assert not list(folder.glob(".join-*"))
+    if scenario == "complete":
+        assert target.read_bytes() == b"firstsecond"
+        assert all(not part.exists() for part in parts)
+    else:
+        assert all(part.read_bytes() == data for part, data in parts.items())
+        if scenario in ("existing", "publish_race"):
+            assert target.read_bytes() == b"existing output"
+        else:
+            assert not target.exists()
+
+
+def test_autorename_keeps_episode_without_season_with_rust_disabled(monkeypatch):
+    from bot.helper.ext_utils.autorename_utils import apply_autorename_template
+
+    monkeypatch.setenv("USE_RUST_CORE", "false")
+    assert apply_autorename_template("Show Episode 4.mkv", "{title} E{episode}") == "Show E04.mkv"
+
+
 def test_video_split_falls_back_to_document_parts_without_uploading_partials():
     proceed_split = load_method(
         COMMON_SOURCE,
@@ -1745,7 +1823,7 @@ def test_locked_merge_plan_rejects_late_reorder(merge_plan_store_fixture):
 
 
 def test_merge_planner_assets_keep_unattended_tasks_automatic():
-    javascript = (ROOT / "web/static/js/merge-planner.js").read_text(
+    javascript = (ROOT / "web/ui/src/pages/merge-planner/Page.svelte").read_text(
         encoding="utf-8"
     )
     listener = (ROOT / "bot/helper/listeners/task_listener.py").read_text(

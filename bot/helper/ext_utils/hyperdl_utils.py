@@ -937,6 +937,52 @@ class HypertgDownload(HypertgTransfer):
             )
             return None
 
+        if os.getenv("USE_GO_ENGINE", "true").strip().lower() in {"1", "true", "yes", "on"}:
+            from tempfile import TemporaryDirectory
+
+            from .go_bridge import GoFloodWait, media_request, record_go_flood, run_task
+
+            go_clients = list(fid_map)
+            sources = [
+                media_request(self.clients[idx], fid_map[idx], self.file_size, 0, self.file_size - 1)
+                for idx in go_clients
+            ]
+            if all(sources):
+                async def report(current, _total):
+                    if self._cancel.is_set():
+                        raise StopTransmission()
+                    self._obj._processed_bytes = current
+
+                try:
+                    destination = Path(final).absolute()
+                    with TemporaryDirectory(prefix=".go-download-", dir=destination.parent) as temp:
+                        staged = Path(temp) / "payload"
+                        go_task = create_task(run_task(
+                            "hyperdl", {"path": str(staged), "sources": sources}, report,
+                        ))
+                        self._tasks.append(go_task)
+                        result = await go_task
+                        if self._cancel.is_set():
+                            return None
+                        if result == self.file_size and staged.stat().st_size == result:
+                            staged.replace(destination)
+                            self._obj._processed_bytes = result
+                            return final
+                except (StopTransmission, CancelledError):
+                    return None
+                except GoFloodWait as wait:
+                    if 0 <= wait.source < len(go_clients):
+                        record_go_flood(self.clients[go_clients[wait.source]], wait.seconds)
+                        ready = {
+                            idx: fid for idx, fid in fid_map.items()
+                            if _download_pacer(self.clients[idx]).flood_until <= monotonic()
+                        }
+                        if ready:
+                            fid_map = ready
+                except OSError:
+                    pass
+                self._obj._processed_bytes = 0
+
         active_clients = self._active_clients = list(fid_map)
         self._left_clients = set()
         n_use = len(active_clients)

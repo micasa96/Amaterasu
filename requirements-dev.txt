@@ -1,0 +1,6 @@
+# Runtime dependencies plus the tools needed to run the test suite.
+# Install with: pip install -r requirements-dev.txt
+-r requirements.txt
+mongomock-motor
+pytest-asyncio
+pytest

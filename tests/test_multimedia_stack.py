@@ -64,6 +64,9 @@ def test_manual_image_verifier_checks_exact_stack_and_codec_availability():
     assert "${AMATERASU_FFMPEG_VERSION#n}" not in verifier
     for codec in ("libsvtav1", "libaom-av1", "libdav1d"):
         assert f'grep -F "{codec}"' in verifier
+    assert "/opt/amaterasu-5fish/bin/ffmpeg" in verifier
+    assert "-err_detect:v +explode" in verifier
+    assert "lineart-psy-bias=3:texture-psy-bias=3" in verifier
 
 
 def test_runtime_image_installs_and_verifies_the_archive_extractor():

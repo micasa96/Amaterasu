@@ -746,7 +746,11 @@ class Mirror(TaskListener):
             LOGGER.info(self.link)
 
         try:
-            await self.before_start()
+            await self.before_start(
+                auto_drive_category=not (
+                    self.is_uphoster or self.is_c2c or self.multi > 1 or self.multi_tag
+                )
+            )
         except Exception as e:
             await self.on_multi_leech_task_error(e)
             await send_message(self.message, e)
@@ -754,8 +758,16 @@ class Mirror(TaskListener):
             await delete_links(self.message)
             return
 
+        if self.is_cancelled:
+            await self.remove_from_same_dir()
+            await delete_links(self.message)
+            return
+
         self._set_mode_engine()
         if not await self.resolve_merge_encode_profile():
+            # Leave the shared folder so sibling merge tasks do not wait forever.
+            await self.remove_from_same_dir("Merge encode profile was not resolved.")
+            await delete_links(self.message)
             return
         await self.prepare_merge_plan()
         await self.send_processing()

@@ -1,35 +1,60 @@
-"""Exercise the real planner script against a small browser/API harness."""
+"""Exercise the real planner page (Svelte) against a small browser/API harness."""
 
 import json
 import os
+import shutil
+import subprocess
 from pathlib import Path
 from urllib.parse import urlsplit
 
 import pytest
 
-SCRIPT = (Path(__file__).resolve().parents[1] / "web/static/js/merge-planner.js").read_text(
-    encoding="utf-8"
-)
-HTML = """<!doctype html><html><head><meta charset="utf-8"></head><body>
-<section class="merge-shell" data-plan-id="proof">
-  <section id="authPanel" hidden><form id="pinForm"><input id="pinInput"></form></section>
-  <section id="errorPanel" hidden><p id="errorMessage"></p></section>
-  <section id="planner" hidden>
-    <span id="planState"><span></span><span></span></span>
-    <span id="planTitle"></span><span id="readyCount"></span>
-    <span id="itemCount"></span><span id="pendingCount"></span>
-    <span id="modeLabel"></span><span id="durationLabel"></span>
-    <span id="saveState"></span><p id="subtitleSummary"></p>
-    <div id="planNotice"><span></span><span></span></div>
-    <button data-sort="input">Input order</button>
-    <button data-sort="filename">Filename</button>
-    <button data-sort="episode">Episode</button>
-    <button data-sort="reverse">Reverse</button>
-    <button id="saveOrderButton" hidden>Save current order</button>
-    <ol id="mergeList"></ol><div id="emptyState"></div>
-  </section>
-</section><script src="/static/js/merge-planner.js"></script>
-</body></html>"""
+ROOT = Path(__file__).resolve().parents[1]
+UI = ROOT / "web" / "ui"
+HTML = ""  # rendered merge_planner.html, set by the module fixture
+DIST = None  # private Vite build of the shared Svelte design system
+
+
+@pytest.fixture(scope="module", autouse=True)
+def planner_page(tmp_path_factory):
+    """Build the Svelte bundle into a temp dir and render the real template.
+
+    The planner is the merge-planner page of the shared design system
+    (web/ui/src/pages/merge-planner), so the browser runs exactly what ships.
+    """
+    global HTML, DIST
+    jinja = pytest.importorskip("jinja2")
+    npx = shutil.which("npx") or shutil.which("npx.cmd")
+    if not npx or not (UI / "node_modules").is_dir():
+        pytest.skip("Node/npm or web/ui/node_modules unavailable; run `npm ci` in web/ui")
+    out = tmp_path_factory.mktemp("ui-dist")
+    build = subprocess.run(
+        [npx, "vite", "build", "--outDir", str(out), "--emptyOutDir", "--logLevel", "error"],
+        cwd=UI, capture_output=True, text=True, timeout=300,
+    )
+    if build.returncode:
+        pytest.fail(f"Svelte build failed: {build.stdout} {build.stderr}")
+    entry = json.loads((out / ".vite" / "manifest.json").read_text(encoding="utf-8"))["src/main.ts"]
+    env = jinja.Environment(loader=jinja.FileSystemLoader(ROOT / "web/templates"), autoescape=True)
+    env.globals["ui_assets"] = {
+        "js": f"/static/dist/{entry['file']}",
+        "css": [f"/static/dist/{css}" for css in entry.get("css", [])],
+    }
+    HTML = env.get_template("merge_planner.html").render(plan_id="proof")
+    DIST = out
+    yield
+
+
+def _static(route, path):
+    """Serve /static/dist from the private build and /static from web/static."""
+    if path.startswith("/static/dist/"):
+        file = DIST / path[len("/static/dist/"):]
+    else:
+        file = ROOT / "web" / path.lstrip("/")
+    if file.is_file():
+        route.fulfill(path=str(file))
+    else:
+        route.fulfill(status=404, body="")
 
 
 def _browser(playwright):
@@ -64,8 +89,8 @@ def test_planner_saves_conflicts_keeps_focus_and_locks():
     def serve(route):
         request = route.request
         path = urlsplit(request.url).path
-        if path == "/static/js/merge-planner.js":
-            route.fulfill(content_type="text/javascript", body=SCRIPT)
+        if path.startswith("/static/"):
+            _static(route, path)
         elif path == "/api/merge-plan/proof":
             if request.method == "POST":
                 payload = json.loads(request.post_data)
@@ -137,8 +162,8 @@ def test_newer_reorder_survives_inflight_save():
 
     def serve(route):
         path = urlsplit(route.request.url).path
-        if path == "/static/js/merge-planner.js":
-            route.fulfill(content_type="text/javascript", body=SCRIPT)
+        if path.startswith("/static/"):
+            _static(route, path)
         elif path == "/api/merge-plan/proof":
             if route.request.method == "POST":
                 payload = json.loads(route.request.post_data)
@@ -175,8 +200,8 @@ def test_initial_connection_failure_recovers_and_missing_pin_does_not_poll():
 
     def serve(route):
         path = urlsplit(route.request.url).path
-        if path == "/static/js/merge-planner.js":
-            route.fulfill(content_type="text/javascript", body=SCRIPT)
+        if path.startswith("/static/"):
+            _static(route, path)
         elif path == "/api/merge-plan/proof":
             calls.append(route.request.url)
             if len(calls) == 1:
@@ -203,10 +228,8 @@ def test_initial_connection_failure_recovers_and_missing_pin_does_not_poll():
 
 def test_real_planner_layout_desktop_and_mobile_without_icon_cdn():
     playwright_api = pytest.importorskip("playwright.sync_api")
-    jinja = pytest.importorskip("jinja2")
-    root = Path(__file__).resolve().parents[1]
-    env = jinja.Environment(loader=jinja.FileSystemLoader(root / "web/templates"), autoescape=True)
-    html = env.get_template("merge_planner.html").render(plan_id="proof")
+    root = ROOT
+    html = HTML
     state = _plan()
     state["items"][0]["name"] = "Season 01 / Episode 02 — A very long video filename with 日本語 and বাংলা subtitles.mkv"
     state["subtitle_summary"] = "2 selectable subtitle tracks. Compatible tracks continue across episodes."
@@ -218,8 +241,7 @@ def test_real_planner_layout_desktop_and_mobile_without_icon_cdn():
         elif url.path == "/api/merge-plan/proof":
             route.fulfill(content_type="application/json", body=json.dumps(state))
         elif url.path.startswith("/static/"):
-            path = root / "web" / url.path.lstrip("/")
-            route.fulfill(path=str(path))
+            _static(route, url.path)
         else:
             route.fulfill(content_type="text/html", body=html)
 
@@ -247,8 +269,8 @@ def test_failed_save_preserves_order_and_locked_conflict_stops_retries():
 
     def serve(route):
         path = urlsplit(route.request.url).path
-        if path == "/static/js/merge-planner.js":
-            route.fulfill(content_type="text/javascript", body=SCRIPT)
+        if path.startswith("/static/"):
+            _static(route, path)
         elif path == "/api/merge-plan/proof":
             if route.request.method == "POST":
                 posts.append(json.loads(route.request.post_data))
@@ -288,8 +310,8 @@ def test_rejected_save_pin_can_be_corrected_without_losing_local_edits():
 
     def serve(route):
         path = urlsplit(route.request.url).path
-        if path == "/static/js/merge-planner.js":
-            route.fulfill(content_type="text/javascript", body=SCRIPT)
+        if path.startswith("/static/"):
+            _static(route, path)
         elif path == "/api/merge-plan/proof":
             if route.request.method == "POST":
                 payload = json.loads(route.request.post_data)
@@ -326,10 +348,8 @@ def test_rejected_save_pin_can_be_corrected_without_losing_local_edits():
 
 def test_real_mobile_touch_drag_saves_the_new_order():
     playwright_api = pytest.importorskip("playwright.sync_api")
-    jinja = pytest.importorskip("jinja2")
-    root = Path(__file__).resolve().parents[1]
-    env = jinja.Environment(loader=jinja.FileSystemLoader(root / "web/templates"), autoescape=True)
-    html = env.get_template("merge_planner.html").render(plan_id="proof")
+    root = ROOT
+    html = HTML
     state = _plan()
     posts = []
 
@@ -347,7 +367,7 @@ def test_real_mobile_touch_drag_saves_the_new_order():
                 state["revision"] += 1
             route.fulfill(content_type="application/json", body=json.dumps(state))
         elif url.path.startswith("/static/"):
-            route.fulfill(path=str(root / "web" / url.path.lstrip("/")))
+            _static(route, url.path)
         else:
             route.fulfill(content_type="text/html", body=html)
 

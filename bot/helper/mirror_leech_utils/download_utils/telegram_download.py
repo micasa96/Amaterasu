@@ -496,90 +496,103 @@ class TelegramDownloadHelper:
         media = getattr(message, message.media.value) if message.media else None
 
         if media is not None:
+            gid = token_hex(5)
             async with global_lock:
                 download = media.file_unique_id not in GLOBAL_GID
+                if download:
+                    # Reserve in the same critical section as the check so a
+                    # second copy sent quickly (or while this one is queued)
+                    # cannot pass the guard before _on_download_start runs.
+                    GLOBAL_GID[media.file_unique_id] = gid
+                    self._id = media.file_unique_id
 
             if download:
-                if not self._listener.name:
-                    if hasattr(media, "file_name") and media.file_name:
-                        if "/" in media.file_name:
-                            self._listener.name = media.file_name.rsplit("/", 1)[-1]
-                            path = path + self._listener.name
-                        else:
-                            self._listener.name = media.file_name
-                    else:
-                        self._listener.name = "None"
-                else:
-                    path = path + self._listener.name
-                self._listener.size = media.file_size
-                gid = token_hex(5)
-
-                msg, button = await stop_duplicate_check(self._listener)
-                if msg:
-                    await self._listener.on_download_error(msg, button)
-                    return
-
-                add_to_queue, event = await check_running_tasks(self._listener)
-                if add_to_queue:
-                    LOGGER.info(f"Added to Queue/Download: {self._listener.name}")
-                    async with task_dict_lock:
-                        task_dict[self._listener.mid] = QueueStatus(
-                            self._listener, gid, "dl"
-                        )
-                    await self._listener.on_download_start()
-                    if self._listener.multi <= 1:
-                        await send_status_message(self._listener.message)
-                    await event.wait()
-                    message = await self._message_after_queue(message)
-                    if self._listener.is_cancelled:
-                        async with global_lock:
-                            if self._id in GLOBAL_GID:
-                                GLOBAL_GID.pop(self._id)
-                        return
-                self._start_time = time()
-                hyper_capacity = self._hyper_capacity()
-                hyper_eligible = (
-                    self._hyper_available
-                    and self._listener.size >= HYPER_DL_MIN_SIZE
-                    and hyper_capacity > 0
-                )
-                if hyper_eligible:
-                    if _claim_hyper_download(hyper_capacity):
-                        self._hyper_download_claimed = True
-                        self._hyper_dl = True
-                        self._download_engine = "HyperDL"
-                        self._standard_session = self.session
-                        self.session = "hyper"
-                        LOGGER.info(
-                            "Telegram download route: HyperDL primary lane "
-                            "(capacity=%s concurrent transfer%s)",
-                            hyper_capacity,
-                            "" if hyper_capacity == 1 else "s",
-                        )
-                    else:
-                        self._hyper_dl = False
-                        self._download_engine = "WZGram"
-                        LOGGER.info(
-                            "Telegram download route: WZGram overflow lane "
-                            "(HyperDL helper pool busy)"
-                        )
-                elif self._hyper_available:
-                    LOGGER.info(
-                        "Telegram download route: WZGram small-file lane "
-                        "(HyperDL threshold=%sMiB)",
-                        HYPER_DL_MIN_SIZE // (1024 * 1024),
-                    )
+                started = False
                 try:
-                    await self._on_download_start(
-                        media.file_unique_id,
-                        gid,
-                        add_to_queue,
+                    if not self._listener.name:
+                        if hasattr(media, "file_name") and media.file_name:
+                            if "/" in media.file_name:
+                                self._listener.name = media.file_name.rsplit("/", 1)[-1]
+                                path = path + self._listener.name
+                            else:
+                                self._listener.name = media.file_name
+                        else:
+                            self._listener.name = "None"
+                    else:
+                        path = path + self._listener.name
+                    self._listener.size = media.file_size
+
+                    msg, button = await stop_duplicate_check(self._listener)
+                    if msg:
+                        await self._listener.on_download_error(msg, button)
+                        return
+
+                    add_to_queue, event = await check_running_tasks(self._listener)
+                    if add_to_queue:
+                        LOGGER.info(f"Added to Queue/Download: {self._listener.name}")
+                        async with task_dict_lock:
+                            task_dict[self._listener.mid] = QueueStatus(
+                                self._listener, gid, "dl"
+                            )
+                        await self._listener.on_download_start()
+                        if self._listener.multi <= 1:
+                            await send_status_message(self._listener.message)
+                        await event.wait()
+                        message = await self._message_after_queue(message)
+                        if self._listener.is_cancelled:
+                            async with global_lock:
+                                if self._id in GLOBAL_GID:
+                                    GLOBAL_GID.pop(self._id)
+                            return
+                    self._start_time = time()
+                    hyper_capacity = self._hyper_capacity()
+                    hyper_eligible = (
+                        self._hyper_available
+                        and self._listener.size >= HYPER_DL_MIN_SIZE
+                        and hyper_capacity > 0
                     )
-                    await self._download(message, path)
+                    if hyper_eligible:
+                        if _claim_hyper_download(hyper_capacity):
+                            self._hyper_download_claimed = True
+                            self._hyper_dl = True
+                            self._download_engine = "HyperDL"
+                            self._standard_session = self.session
+                            self.session = "hyper"
+                            LOGGER.info(
+                                "Telegram download route: HyperDL primary lane "
+                                "(capacity=%s concurrent transfer%s)",
+                                hyper_capacity,
+                                "" if hyper_capacity == 1 else "s",
+                            )
+                        else:
+                            self._hyper_dl = False
+                            self._download_engine = "WZGram"
+                            LOGGER.info(
+                                "Telegram download route: WZGram overflow lane "
+                                "(HyperDL helper pool busy)"
+                            )
+                    elif self._hyper_available:
+                        LOGGER.info(
+                            "Telegram download route: WZGram small-file lane "
+                            "(HyperDL threshold=%sMiB)",
+                            HYPER_DL_MIN_SIZE // (1024 * 1024),
+                        )
+                    started = True
+                    try:
+                        await self._on_download_start(
+                            media.file_unique_id,
+                            gid,
+                            add_to_queue,
+                        )
+                        await self._download(message, path)
+                    finally:
+                        if getattr(self, "_hyper_download_claimed", False):
+                            _release_hyper_download()
+                            self._hyper_download_claimed = False
                 finally:
-                    if getattr(self, "_hyper_download_claimed", False):
-                        _release_hyper_download()
-                        self._hyper_download_claimed = False
+                    if not started:
+                        async with global_lock:
+                            GLOBAL_GID.pop(self._id, None)
             else:
                 await self._on_download_error("File already being downloaded!")
         else:

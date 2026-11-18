@@ -1,4 +1,8 @@
 import ast
+from hashlib import sha256
+from json import dumps, loads
+from logging import getLogger
+from os import environ
 from datetime import datetime, timezone
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
@@ -8,6 +12,9 @@ from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
+from fastapi.testclient import TestClient
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -73,30 +80,89 @@ def _web_branding_context():
     sorted(path.name for path in (ROOT / "web/templates").glob("*.html")
            if path.name not in {"base.html", "brand_icons.html"}),
 )
-def test_every_web_page_has_resolvable_blackflare_branding(template_name):
+def test_every_web_page_mounts_a_shared_design_system_page(template_name):
+    """Every page is a thin Jinja host for one Svelte page that shares the
+    global design system (web/ui) and the Blackflare browser icons."""
     environment = Environment(
         loader=FileSystemLoader(ROOT / "web/templates"), autoescape=select_autoescape(),
     )
-    rendered = environment.get_template(template_name).render(**_web_branding_context())
+    context = {**_web_branding_context(), "app_version": "v-test", "error": "",
+               "ui_assets": {"js": "/static/dist/main-test.js",
+                             "css": ["/static/dist/assets/main-test.css"]}}
+    rendered = environment.get_template(template_name).render(**context)
     assert '/static/images/brand/favicon.svg' in rendered
     assert '/static/images/brand/favicon.ico' in rendered
-    assert '/static/images/brand/blackflare.svg' in rendered
-    assert "paint0_radial" not in rendered
+    assert '<script type="module" src="/static/dist/main-test.js">' in rendered
+    assert 'href="/static/dist/assets/main-test.css"' in rendered
+    assert 'id="page-data"' in rendered
+    pages = findall(r'<div id="app" data-page="([a-z0-9-]+)"', rendered)
+    assert len(pages) == 1, pages
+    assert (ROOT / "web/ui/src/pages" / pages[0] / "Page.svelte").is_file(), pages[0]
     for resource in findall(r'(?:src|href)="(/static/images/brand/[^\"]+)"', rendered):
         assert (ROOT / "web" / resource.lstrip("/")).is_file(), resource
 
 
-def test_light_login_uses_ink_blackflare_and_shared_browser_icons():
-    tree = ast.parse((ROOT / "web/wserver.py").read_text(encoding="utf-8"))
-    login = next(ast.literal_eval(node.value) for node in tree.body
-                 if isinstance(node, ast.Assign)
-                 and any(isinstance(target, ast.Name) and target.id == "_LOGIN_PAGE_HTML"
-                         for target in node.targets))
-    assert '/static/images/brand/blackflare-ink.svg' in login
-    assert '/static/images/brand/favicon.svg' in login
-    assert '/static/images/brand/favicon.ico' in login
-    for resource in findall(r'(?:src|href)="(/static/images/brand/[^\"]+)"', login):
-        assert (ROOT / "web" / resource.lstrip("/")).is_file(), resource
+def test_login_is_a_design_system_page_not_inline_html():
+    source = (ROOT / "web/wserver.py").read_text(encoding="utf-8")
+    assert "_LOGIN_PAGE_HTML" not in source
+    assert '"login.html"' in source
+    assert (ROOT / "web/ui/src/pages/login/Page.svelte").is_file()
+
+
+@pytest.mark.parametrize("image_build", [False, True])
+def test_player_bundle_is_served_from_manifest_directory(tmp_path, monkeypatch, image_build):
+    checkout = tmp_path / "checkout"
+    static = checkout / "web" / "static"
+    static.mkdir(parents=True)
+    (static / "legacy.css").write_text("body {}", encoding="utf-8")
+    monkeypatch.chdir(checkout)
+    dist = tmp_path / "image-ui" if image_build else static / "dist"
+    (dist / ".vite").mkdir(parents=True)
+    if image_build:
+        monkeypatch.setenv("AMATERASU_UI_DIST", str(dist))
+        assert not (static / "dist").exists()
+    else:
+        monkeypatch.delenv("AMATERASU_UI_DIST", raising=False)
+
+    bundle = "main-fixture.js"
+    (dist / bundle).write_text("export {};", encoding="utf-8")
+    (dist / ".vite" / "manifest.json").write_text(
+        dumps({"src/main.ts": {"file": bundle}}), encoding="utf-8"
+    )
+    source = ast.parse((ROOT / "web/wserver.py").read_text(encoding="utf-8"))
+    nodes = [node for node in source.body if (
+        isinstance(node, ast.FunctionDef) and node.name == "_mount_ui_assets"
+        or isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == "_UI_ASSETS" for target in node.targets
+        )
+        or isinstance(node, ast.Expr) and ast.unparse(node).startswith("app.mount('/static',")
+    )]
+    app = FastAPI()
+    namespace = {
+        "app": app, "FastAPI": FastAPI, "StaticFiles": StaticFiles,
+        "__file__": str(checkout / "web" / "wserver.py"), "Path": Path,
+        "environ": environ, "json_loads": loads, "sha256": sha256, "LOGGER": getLogger(__name__),
+    }
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), "wserver.py", "exec"), namespace)
+    assets = namespace["_UI_ASSETS"]
+    environment = Environment(loader=FileSystemLoader(ROOT / "web/templates"))
+    rendered = environment.get_template("player.html").render(
+        **_web_branding_context(), ui_assets=assets
+    )
+    assert f'<script type="module" src="/static/dist/{bundle}">' in rendered
+    with TestClient(app) as client:
+        response = client.get(assets["js"])
+        assert response.status_code == 200
+        assert response.text == "export {};"
+        assert client.get("/static/legacy.css").status_code == 200
+
+
+def test_brand_mark_is_the_blackflare_flame_in_ink():
+    mark = (ROOT / "web/ui/src/ui/BrandMark.svelte").read_text(encoding="utf-8")
+    flame = (ROOT / "web/static/images/brand/blackflare-ink.svg").read_text(encoding="utf-8")
+    path = findall(r' d="([^"]+)"', flame)[0]
+    assert " ".join(path.split()) in " ".join(mark.split())
+    assert "var(--button-text)" in mark
 
 
 def _load_inline_ui():

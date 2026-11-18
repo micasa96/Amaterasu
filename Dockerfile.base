@@ -21,6 +21,23 @@
 #  Or native (faster, no QEMU):
 #    docker build -f Dockerfile.base -t amaterasu-base:latest .
 # =============================================================================
+FROM rust:1.96-bookworm AS rust-builder
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3-dev python3-venv \
+    && rm -rf /var/lib/apt/lists/* \
+    && python3 -m venv /build/venv \
+    && /build/venv/bin/pip install --no-cache-dir "maturin>=1.9,<2"
+WORKDIR /build/rust-core
+COPY rust-core/ ./
+RUN /build/venv/bin/maturin build --locked --release --strip --out /dist
+
+FROM golang:1.26-bookworm AS go-builder
+WORKDIR /build/go-engine
+COPY go-engine/go.mod go-engine/go.sum ./
+RUN go mod download
+COPY go-engine/ ./
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /usr/local/bin/amaterasu-go ./cmd/amaterasu-go
+
 FROM --platform=$TARGETPLATFORM docker.io/library/python:3.11-slim-bookworm AS base
 
 ARG TARGETPLATFORM
@@ -194,6 +211,9 @@ RUN set -eux; \
         --with-sqlite3; \
     make -j"$(nproc)"; \
     make install; \
+    # autotools builds with -g by default; strip in this same layer so the
+    # debug symbols never reach the image (a later RUN could not shrink it).
+    strip --strip-unneeded /usr/local/bin/aria2c; \
     ldconfig; \
     aria2c --version; \
    aria2c --version | grep -F "aria2 version ${ARIA2_VERSION}" || echo "WARNING: version mismatch"; \
@@ -309,20 +329,33 @@ ENV AMATERASU_FFMPEG_VERSION="${FFMPEG_VERSION}" \
     AMATERASU_SVT_AV1_VERSION="${SVT_AV1_VERSION}" \
     AMATERASU_AOM_VERSION="${AOM_VERSION}" \
     AMATERASU_DAV1D_VERSION="${DAV1D_VERSION}"
+# The fork and standard SVT export the same library name with different headers.
+RUN set -eux; \
+    git clone --depth 1 --branch v2.3.260827 \
+        https://github.com/5fish/SVT-AV1.git /tmp/svt-5fish; \
+    test "$(git -C /tmp/svt-5fish rev-parse HEAD)" = "1c4fb91a06b0b14aafefe11835dafd91d337a3a4"; \
+    cmake -S /tmp/svt-5fish -B /tmp/svt-5fish/build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/opt/amaterasu-5fish \
+        -DCMAKE_INSTALL_LIBDIR=lib \
+        -DBUILD_SHARED_LIBS=ON \
+        -DBUILD_TESTING=OFF; \
+    cmake --build /tmp/svt-5fish/build -j"$(nproc)"; \
+    cmake --install /tmp/svt-5fish/build; \
+    install -Dm644 /tmp/svt-5fish/LICENSE.md /opt/amaterasu-5fish/LICENSE.md; \
+    install -Dm644 /tmp/svt-5fish/PATENTS.md /opt/amaterasu-5fish/PATENTS.md; \
+    rm -rf /tmp/svt-5fish
+
 RUN set -eux; \
     git clone --depth 1 --branch "${FFMPEG_VERSION}" \
         https://github.com/FFmpeg/FFmpeg.git /tmp/ffmpeg; \
     cd /tmp/ffmpeg; \
-    ./configure \
-        --prefix=/usr/local \
-        --extra-cflags="-I/usr/local/include" \
-        --extra-ldflags="-L/usr/local/lib" \
+    configure_ffmpeg() { ./configure \
         --enable-gpl \
         --enable-nonfree \
         --enable-version3 \
-        --enable-shared \
-        --disable-static \
         --disable-doc \
+        --disable-debug \
         --enable-pic \
         --enable-libaom \
         --enable-libdav1d \
@@ -344,10 +377,21 @@ RUN set -eux; \
         --enable-libsoxr \
         --enable-libvidstab \
         --enable-libxvid \
-        --enable-libbluray; \
+        --enable-libbluray "$@"; }; \
+    configure_ffmpeg --prefix=/usr/local --enable-shared --disable-static \
+        --extra-cflags="-I/usr/local/include" \
+        --extra-ldflags="-L/usr/local/lib"; \
     make -j"$(nproc)"; \
     make install; \
     ldconfig; \
+    make distclean; \
+    PKG_CONFIG_PATH="/opt/amaterasu-5fish/lib/pkgconfig" \
+        configure_ffmpeg --prefix=/opt/amaterasu-5fish --enable-static --disable-shared \
+        --disable-ffprobe --disable-ffplay \
+        --extra-cflags="-I/opt/amaterasu-5fish/include -I/usr/local/include" \
+        --extra-ldflags="-L/opt/amaterasu-5fish/lib -Wl,-rpath,/opt/amaterasu-5fish/lib -L/usr/local/lib"; \
+    make -j"$(nproc)" ffmpeg; \
+    install -Dm755 ffmpeg /opt/amaterasu-5fish/bin/ffmpeg; \
     rm -rf /tmp/ffmpeg
 
 # -----------------------------------------------------------------------------
@@ -515,6 +559,15 @@ RUN set -eux; \
     ffmpeg -hide_banner -encoders | grep -F 'libaom-av1'; \
     echo "=== FFmpeg AV1 decoders ==="; \
     ffmpeg -hide_banner -decoders | grep -F 'libdav1d'; \
+    echo "=== 5fish encoder isolation and playback ==="; \
+    ldd /usr/local/bin/ffmpeg | grep -F '/usr/local/lib/libSvtAv1Enc.so'; \
+    ldd /opt/amaterasu-5fish/bin/ffmpeg | grep -F '/opt/amaterasu-5fish/lib/libSvtAv1Enc.so'; \
+    /opt/amaterasu-5fish/bin/ffmpeg -v error -f lavfi -i color=size=128x128:rate=24 \
+        -frames:v 4 -c:v libsvtav1 -pix_fmt yuv420p10le -preset 2 -crf 26 -err_detect:v +explode \
+        -svtav1-params 'lp=1:keyint=225:fast-decode=0:lineart-psy-bias=3:texture-psy-bias=3' \
+        /tmp/svt-5fish-smoke.mkv; \
+    ffmpeg -v error -xerror -c:v libdav1d -i /tmp/svt-5fish-smoke.mkv -f null -; \
+    rm /tmp/svt-5fish-smoke.mkv; \
     echo "=== libmega.so files in /usr/local/lib ==="; \
     ls -la /usr/local/lib/libmega.so* 2>/dev/null || echo "WARNING: no libmega.so in /usr/local/lib"; \
     echo "=== ldconfig cache (libmega entries) ==="; \
@@ -534,6 +587,12 @@ RUN set -eux; \
     which java || echo "WARNING: java not found"; \
     which gunicorn || echo "WARNING: gunicorn not found"; \
     echo "=== ALL COMPONENTS VERIFIED ==="
+
+COPY --from=go-builder /usr/local/bin/amaterasu-go /usr/local/bin/amaterasu-go
+RUN --mount=from=rust-builder,source=/dist,target=/tmp/wheels \
+    python3 -m pip install --no-cache-dir /tmp/wheels/*.whl \
+    && python3 -c "import amaterasu_rs" \
+    && amaterasu-go --help
 
 WORKDIR /app
 

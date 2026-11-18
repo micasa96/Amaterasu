@@ -198,7 +198,7 @@ class Config:
     UPLOAD_PATHS = {}
     DRIVE_CATEGORY_MODE = False
     DRIVE_CATEGORY_SA = ""
-    UPSTREAM_REPO = "https://github.com/Zan-getsu/Amaterasu"
+    UPSTREAM_REPO = "https://github.com/its-niloy/Amaterasu"
     UPSTREAM_BRANCH = "main"
     AUTO_UPDATE = False  # opt-in; never modify a deployment checkout by default
     UPDATE_PKGS = False  # default off — pin and update explicitly to avoid surprises
@@ -713,5 +713,6 @@ class BinConfig:
     # use /usr/bin. Resolve it at startup so every encode/thumbnail command
     # uses the binary that is actually present in the image.
     FFMPEG_NAME = which("ffmpeg") or "/usr/bin/ffmpeg"
+    FFMPEG_5FISH_NAME = which("/opt/amaterasu-5fish/bin/ffmpeg")
     RCLONE_NAME = "rclone"
     SABNZBD_NAME = "sabnzbdplus"

@@ -1,5 +1,7 @@
 import re
 
+from .rust_bridge import rust_core
+
 # Enhanced regex patterns for season and episode extraction
 SEASON_EPISODE_PATTERNS = [
     # Standard patterns (S01E02, S01EP02)
@@ -29,11 +31,11 @@ QUALITY_PATTERNS = [
 
 def extract_season_episode(filename):
     """Extract season and episode numbers from filename"""
-    for pattern, (season_group, episode_group) in SEASON_EPISODE_PATTERNS:
+    for pattern, (season_group, _) in SEASON_EPISODE_PATTERNS:
         match = pattern.search(filename)
         if match:
             season = match.group(1) if season_group else None
-            episode = match.group(2) if episode_group else match.group(1)
+            episode = match.group(2 if season_group else 1)
             # Pad with zeros if they are just one digit
             if season and len(season) == 1:
                 season = f"0{season}"
@@ -84,11 +86,15 @@ def apply_autorename_template(filename: str, template: str) -> str:
     Variables supported: {title}, {season}, {episode}, {quality}
     """
     import os
-    ext = os.path.splitext(filename)[1]
-    
-    season, episode = extract_season_episode(filename)
-    quality = extract_quality(filename)
-    title = clean_title(filename)
+    stem, ext = os.path.splitext(filename)
+
+    native = rust_core()
+    if native is not None and filename.isascii() and filename.isprintable():
+        season, episode, quality, title = native.parse_release_metadata(filename, stem)
+    else:
+        season, episode = extract_season_episode(filename)
+        quality = extract_quality(filename)
+        title = clean_title(filename)
     
     # Prepare replacements
     replacements = {

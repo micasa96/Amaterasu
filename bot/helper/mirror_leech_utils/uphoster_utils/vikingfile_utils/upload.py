@@ -1,4 +1,5 @@
 from io import BufferedReader
+from json import loads
 from logging import getLogger
 from os import path as ospath
 from os import walk as oswalk
@@ -9,9 +10,12 @@ from aiohttp import ClientSession, FormData
 from tenacity import (
     RetryError,
     retry,
-    retry_if_exception_type,
+    retry_if_exception,
     stop_after_attempt,
     wait_exponential,
+)
+from bot.helper.ext_utils.go_bridge import (
+    cancel_hoster, hoster_receipt, retry_hoster_error, upload_hoster,
 )
 
 from bot.core.config_manager import Config
@@ -93,28 +97,42 @@ class VikingFileUpload:
     @retry(
         wait=wait_exponential(multiplier=2, min=4, max=8),
         stop=stop_after_attempt(3),
-        retry=retry_if_exception_type(Exception),
+        retry=retry_if_exception(retry_hoster_error),
     )
     async def upload_file(self, path, folder_path=""):
         if self.listener.is_cancelled:
             return None
         server = await self.__get_server()
         file_name = ospath.basename(path)
-        with ProgressFileReader(
-            filename=path, read_callback=self.__progress_callback
-        ) as file:
-            data = FormData()
-            data.add_field("file", file, filename=file_name)
-            data.add_field("user", self.token or "")
-            if folder_path:
-                data.add_field("path", folder_path)
-            async with ClientSession() as session:
-                async with session.post(server, data=data) as resp:
-                    result = await resp.json(content_type=None)
-        url = result.get("url")
-        if url:
-            return url
-        raise Exception(f"VikingFile upload failed: {result}")
+        fields = {"user": self.token or ""}
+        if folder_path:
+            fields["path"] = folder_path
+        reply = await upload_hoster(
+            "vikingfile", server, path, self, self.__progress_callback,
+            field="file", filename=file_name, fields=fields,
+        )
+        if reply is not None:
+            status = reply["code"]
+            with hoster_receipt(status):
+                result = loads(reply["text"])
+        else:
+            with ProgressFileReader(
+                filename=path, read_callback=self.__progress_callback
+            ) as file:
+                data = FormData()
+                data.add_field("file", file, filename=file_name)
+                for name, value in fields.items():
+                    data.add_field(name, value)
+                async with ClientSession() as session:
+                    async with session.post(server, data=data) as resp:
+                        status = resp.status
+                        with hoster_receipt(status):
+                            result = await resp.json(content_type=None)
+        with hoster_receipt(status):
+            url = result.get("url")
+            if url:
+                return url
+            raise Exception(f"VikingFile upload failed: {result}")
 
     async def _upload_dir(self, input_directory):
         links = []
@@ -185,6 +203,7 @@ class VikingFileUpload:
 
     async def cancel_task(self):
         self.listener.is_cancelled = True
+        await cancel_hoster(self)
         if self.is_uploading:
             LOGGER.info(f"Cancelling VikingFile Upload: {self.listener.name}")
             await self.listener.on_upload_error("VikingFile upload has been cancelled.")

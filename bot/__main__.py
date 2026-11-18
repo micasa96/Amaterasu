@@ -211,6 +211,10 @@ async def main():
     # first encode doesn't pay the probe cost. Logs the detected encoder.
     from .helper.ext_utils.hwaccel import init_hwaccel_detection
     create_tracked_task(init_hwaccel_detection())
+    # The web UI runs in its own process; publish the live task count and
+    # bot start time so /api/status and /metrics report real numbers.
+    from .helper.ext_utils.runtime_status import publish_bot_status
+    create_tracked_task(publish_bot_status())
 
     from .core.auto_restart import schedule_auto_restart
 

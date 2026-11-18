@@ -15,6 +15,36 @@ env:
   AMATERASU_DB_PARTITION_SALT: "wzmlx_v3_db_partition_salt"
 
 jobs:
+  web-ui:
+    name: Web UI (Svelte design system)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: web/ui
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/ui/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm run check -- --threshold error
+      - run: node --test ../../tests/encode_profile_model.test.mjs
+      - run: npm run build
+
+  go-sidecar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go-engine/go.mod
+          cache-dependency-path: go-engine/go.sum
+      - run: go test -race ./...
+        working-directory: go-engine
+
   filetolink:
     name: FileToLink cache, library and ZIP checks
     runs-on: ubuntu-latest
@@ -25,9 +55,9 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install focused test dependencies
-        run: python -m pip install pytest pytest-asyncio fastapi==0.141.1 httpx aiofiles wzgram==3.1.5
+        run: python -m pip install pytest pytest-asyncio fastapi==0.141.1 httpx aiofiles wzgram==3.1.7
       - name: Test media storage and range streaming
-        run: python -m pytest tests/test_filetolink_library.py tests/test_adaptive_tg_stream.py
+        run: python -m pytest tests/test_filetolink_library.py tests/test_adaptive_tg_stream.py tests/test_go_bridge.py tests/test_rust_bridge.py
 
   merge-media:
     name: Linux Merge Regression Checks
@@ -88,7 +118,7 @@ jobs:
       - name: Run lightweight smoke tests
         run: |
           test_files=""
-          for file in tests/test_config.py tests/test_security.py tests/test_multimedia_stack.py; do
+          for file in tests/test_config.py tests/test_security.py tests/test_multimedia_stack.py tests/test_encoding_playback_safety.py; do
             if [ -f "$file" ]; then
               test_files="$test_files $file"
             fi

@@ -117,6 +117,7 @@ async def add_mega_download(listener, path):
 
     async_api = None
     mega_base = ""
+    is_folder = False
     try:
         sdk_gid = token_hex(5)
         await makedirs(path, exist_ok=True)
@@ -315,15 +316,18 @@ async def add_mega_download(listener, path):
             await listener.on_download_error(f"Internal error: {e}")
     finally:
         if async_api is not None:
-            if not is_folder:
-                async with _MEGA_SDK_LOCK:
+            # Tear down folder sessions too; nothing else logs out folder_api,
+            # so skipping it leaked both MegaApi instances and their threads
+            # per folder download. logout() covers folder_api and is bounded
+            # by _LOGOUT_TIMEOUT_SECONDS.
+            async with _MEGA_SDK_LOCK:
+                with suppress(Exception):
+                    await async_api.logout()
+                if async_api.api is not None and async_api._mega_listener is not None:
                     with suppress(Exception):
-                        await async_api.logout()
-                    if async_api.api is not None and async_api._mega_listener is not None:
-                        with suppress(Exception):
-                            async_api.api.removeListener(async_api._mega_listener)
-                    if async_api.folder_api is not None and async_api._folder_listener is not None:
-                        with suppress(Exception):
-                            async_api.folder_api.removeListener(async_api._folder_listener)
+                        async_api.api.removeListener(async_api._mega_listener)
+                if async_api.folder_api is not None and async_api._folder_listener is not None:
+                    with suppress(Exception):
+                        async_api.folder_api.removeListener(async_api._folder_listener)
         await _release_link(listener.link)
         await clean_download(mega_base)

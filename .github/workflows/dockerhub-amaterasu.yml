@@ -41,6 +41,8 @@ on:
       - master
     paths:
       - Dockerfile.base
+      - 'go-engine/**'
+      - 'rust-core/**'
       - .github/workflows/dockerhub-amaterasu.yml
 
 permissions:

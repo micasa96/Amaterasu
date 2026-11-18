@@ -17,6 +17,121 @@ MODULE_PATH = (
 WSERVER_PATH = Path(__file__).parents[1] / "web" / "wserver.py"
 
 
+@pytest.fixture
+def go_bridge():
+    path = MODULE_PATH.parents[1] / "ext_utils" / "go_bridge.py"
+    spec = importlib.util.spec_from_file_location("amaterasu_go_bridge_test", path)
+    bridge = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(bridge)
+    return bridge
+
+
+@pytest.mark.asyncio
+async def test_go_range_resumes_at_first_missing_byte(monkeypatch, go_bridge):
+    import httpx
+
+    bridge = go_bridge
+    client = SimpleNamespace()
+    monkeypatch.setattr(bridge, "media_request", lambda *args: {})
+
+    class InterruptedRange(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b"a"
+            raise httpx.ReadError("interrupted")
+
+    def fake_client(response):
+        return httpx.AsyncClient(
+            base_url="http://sidecar", transport=httpx.MockTransport(lambda _req: response)
+        )
+
+    monkeypatch.setattr(bridge, "go_client", lambda: fake_client(httpx.Response(503)))
+    assert [part async for part in bridge.stream_range(client, "id", 10, 2, 4)] == []
+
+    response = httpx.Response(
+        206,
+        headers={"Content-Range": "bytes 2-4/10", "Content-Length": "3"},
+        stream=InterruptedRange(),
+    )
+    def go_client():
+        def handle(request):
+            if request.url.path == "/v1/cooldown":
+                return httpx.Response(429, headers={"Retry-After": "60"})
+            return response
+
+        return httpx.AsyncClient(base_url="http://sidecar", transport=httpx.MockTransport(handle))
+
+    monkeypatch.setattr(bridge, "go_client", go_client)
+    offsets = []
+
+    async def resume(offset):
+        assert offset == 3
+        assert client._amaterasu_go_flood_until > bridge.monotonic()
+        yield b"bc"
+
+    stream = bridge.stream_range(client, "id", 10, 2, 4)
+    first = await anext(stream)
+    resumed = bridge.recover_go_range(stream, first, 2, 4, resume, offsets.append)
+    assert b"".join([part async for part in resumed]) == b"abc"
+    assert offsets == [3]
+
+
+@pytest.mark.asyncio
+async def test_stalled_hoster_task_cancels_without_progress(monkeypatch, go_bridge):
+    started = asyncio.Event()
+    closed = asyncio.Event()
+
+    async def stalled(*args, **kwargs):
+        started.set()
+        try:
+            await asyncio.Future()
+        finally:
+            closed.set()
+
+    monkeypatch.setenv("USE_GO_ENGINE", "true")
+    monkeypatch.setattr(go_bridge, "run_task", stalled)
+    uploader = SimpleNamespace(listener=SimpleNamespace(is_cancelled=False))
+    pending = asyncio.create_task(
+        go_bridge.upload_hoster("pixeldrain", "https://pixeldrain.com/", "unused", uploader, lambda _: None)
+    )
+    await asyncio.wait_for(started.wait(), 1)
+    uploader.listener.is_cancelled = True
+    await asyncio.wait_for(go_bridge.cancel_hoster(uploader), 1)
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+    assert closed.is_set() and uploader._go_hoster_task is None
+
+
+def test_host_accepted_but_unreadable_receipt_is_not_retried(go_bridge):
+    with pytest.raises(go_bridge.HostUploadUncertain) as error:
+        with go_bridge.hoster_receipt(201):
+            raise ValueError("invalid JSON")
+    assert not go_bridge.retry_hoster_error(error.value)
+    assert go_bridge.retry_hoster_error(OSError("rejected"))
+
+
+@pytest.mark.asyncio
+async def test_go_wait_event_updates_account_before_upload_fallback(go_bridge, tmp_path, monkeypatch):
+    import httpx
+
+    client = SimpleNamespace(bot_token="fixture", api_id=1, api_hash="fixture")
+    file = tmp_path / "file"
+    with file.open("wb") as data:
+        data.truncate(11 * 1024**2)
+
+    def sidecar(_timeout=15):
+        response = httpx.Response(
+            200, text='data: {"status":"cooldown","retry_after":62,"source":-1}\n\n'
+        )
+        return httpx.AsyncClient(
+            base_url="http://sidecar", transport=httpx.MockTransport(lambda _request: response),
+        )
+
+    monkeypatch.setattr(go_bridge, "go_client", sidecar)
+    start = go_bridge.monotonic()
+    assert await go_bridge.upload_parts(client, str(file), None) is None
+    assert client._amaterasu_send_flood_until >= start + 62
+
+
 def load_stream_module():
     name = "amaterasu_adaptive_tg_stream_test"
     sys.modules.pop(name, None)
@@ -260,7 +375,7 @@ def test_web_stream_keeps_native_fallback_and_existing_cache_layer():
     assert "_begin_progressive_cache(" in source
     assert "_existing_cached_media(" in source
     adaptive_setup = source[
-        source.index("if FILETOLINK_ADAPTIVE_STREAMING:") : source.index(
+        source.index("if go_first is None and FILETOLINK_ADAPTIVE_STREAMING:") : source.index(
             "transfer_source = ("
         )
     ]

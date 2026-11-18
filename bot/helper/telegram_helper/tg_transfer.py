@@ -99,6 +99,7 @@ def _download_pacer(client):
     pacer = getattr(client, "_amaterasu_download_pacer", None)
     if pacer is None:
         pacer = client._amaterasu_download_pacer = _DownloadPacer()
+        pacer.flood_until = getattr(client, "_amaterasu_go_flood_until", 0)
     return pacer
 
 

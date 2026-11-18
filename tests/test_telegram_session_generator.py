@@ -97,11 +97,17 @@ def test_private_page_uses_user_bound_expiring_token(monkeypatch):
     )
 
 
-def test_session_page_has_complete_secure_responsive_flow():
-    template = (ROOT / "web/templates/session_generator.html").read_text(
-        encoding="utf-8"
-    )
+SESSION_PAGE = ROOT / "web/ui/src/pages/session-generator/Page.svelte"
 
+
+def test_session_page_has_complete_secure_responsive_flow():
+    host = (ROOT / "web/templates/session_generator.html").read_text(encoding="utf-8")
+    template = SESSION_PAGE.read_text(encoding="utf-8")
+
+    assert "{% block page %}session-generator{% endblock %}" in host
+    for key in ("user_id", "page_token", "step", "attempt_id", "phone_hint",
+                "password_hint", "session_history", "error", "success"):
+        assert f'"{key}": ' in host
     assert "/api/session-generator/start" in template
     assert "/api/session-generator/verify" in template
     assert "/api/session-generator/password" in template
@@ -109,26 +115,29 @@ def test_session_page_has_complete_secure_responsive_flow():
     assert "/api/session-generator/copy" in template
     assert 'name="api_id"' in template
     assert 'name="api_hash"' in template
+    assert 'name="attempt"' in template
     assert "uses_config_credentials" not in template
     assert "Replace saved session" not in template
     assert 'id="replace-session"' not in template
     assert 'autocomplete="one-time-code"' in template
-    assert 'pattern="[0-9]( [0-9]){4,5}"' in template
+    # The braces are escaped for Svelte; the rendered pattern is [0-9]( [0-9]){4,5}.
+    assert "pattern=\"[0-9]( [0-9]){'{'}4,5{'}'}\"" in template
     assert "spacing is added automatically" in template
     assert "formatLoginCode" in template
     assert 'autocomplete="current-password"' in template
+    assert 'type={showPassword ? "text" : "password"}' in template
     assert "Saved Messages" in template
     assert "decrypted only when you press Copy" in template
-    assert 'data-copy-session="{{ saved.session_id }}"' in template
-    assert "{{ session_string" not in template
-    assert "@media (max-width: 980px)" in template
-    assert "@media (max-width: 640px)" in template
-    assert "@media (max-width: 380px)" in template
-    assert "prefers-reduced-motion" in template
-    assert ":active:not(:disabled)" in template
+    assert "data-copy-session={saved.session_id}" in template
+    assert 'result.session = ""' in template
+    assert "session_string" not in template
+    assert "@media (max-width: 64rem)" in template
+    assert "@media (max-width: 40rem)" in template
+    assert "font-size: 1rem" in template
     assert "transition: all" not in template
-    assert "—" not in template
-    assert "–" not in template
+    for source in (host, template):
+        assert "—" not in source
+        assert "–" not in source
 
 
 def test_session_start_always_uses_user_supplied_api_credentials():
@@ -162,8 +171,12 @@ def test_session_page_renders_each_authentication_state(step):
 
     assert "Telegram Session Generator" in rendered
     assert "private-page-token" in rendered
+    assert 'data-page="session-generator"' in rendered
+    assert f'"step": "{step}"' in rendered
     if step == "password":
-        assert "&lt;not markup&gt;" in rendered
+        # Server text reaches the page only as escaped JSON, never as markup.
+        assert "<not markup>" not in rendered
+        assert "\\u003cnot markup\\u003e" in rendered
 
 
 def test_database_updates_current_session_and_keeps_encrypted_history(monkeypatch):

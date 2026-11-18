@@ -19,6 +19,27 @@ def entry_name(index, name):
     return f"{index:03d}-{name[:180].rstrip('. ') or 'file'}"
 
 
+class ArchiveCapacityError(ValueError):
+    """The ZIP needs a streaming download instead of a disk reservation."""
+
+
+class _ZipOutput:
+    def __init__(self):
+        self.pending = []
+
+    def write(self, data):
+        if data:
+            self.pending.append(data)
+        return len(data)
+
+    def flush(self):
+        pass
+
+    def drain(self):
+        pending, self.pending = self.pending, []
+        return pending
+
+
 class PlaylistArchives:
     AGE = 86400
     READ_TIMEOUT = 60
@@ -94,9 +115,7 @@ class PlaylistArchives:
                 raise ValueError("Two ZIPs are being prepared. Try again after one finishes.")
             total = sum(int(f["size"]) for f in files) + 4096 * len(files) + 65536
             if total + self.reserved > self.max_bytes:
-                raise ValueError(
-                    "This ZIP exceeds the available cache budget. Use individual downloads."
-                )
+                raise ArchiveCapacityError("This ZIP exceeds the available cache budget.")
             await asyncio.to_thread(self.prune, total)
             used = await asyncio.to_thread(self.usage)
             free = (await asyncio.to_thread(shutil.disk_usage, self.root)).free
@@ -104,9 +123,7 @@ class PlaylistArchives:
                 total + used + self.reserved > self.max_bytes
                 or total + self.reserved + 64 * 1024**2 > free
             ):
-                raise ValueError(
-                    "Not enough ZIP cache space. Use individual downloads or increase the cache budget."
-                )
+                raise ArchiveCapacityError("Not enough ZIP cache space.")
             job = dict(
                 state="preparing",
                 bytes=0,
@@ -119,6 +136,38 @@ class PlaylistArchives:
             job["task"] = asyncio.create_task(self._build(key, files, read, job))
             return key
 
+    async def _file_chunks(self, item, read):
+        done = 0
+        async with aclosing(read(item)) as source:
+            while True:
+                try:
+                    chunk = await asyncio.wait_for(anext(source), self.READ_TIMEOUT)
+                except StopAsyncIteration:
+                    break
+                done += len(chunk)
+                if done > item["size"]:
+                    raise OSError("ZIP source changed size")
+                yield chunk
+        if done != item["size"]:
+            raise OSError("ZIP source ended early")
+
+    async def stream(self, files, read):
+        output = _ZipOutput()
+        # zipfile writes data descriptors on non-seekable output. Keep one
+        # input chunk at a time and emit the central directory only on success.
+        with ZipFile(output, "w", allowZip64=True) as archive:
+            for index, item in enumerate(files, 1):
+                with archive.open(entry_name(index, item["name"]), "w", force_zip64=True) as entry:
+                    async with aclosing(self._file_chunks(item, read)) as chunks:
+                        async for chunk in chunks:
+                            entry.write(chunk)
+                            for block in output.drain():
+                                yield block
+                for block in output.drain():
+                    yield block
+        for block in output.drain():
+            yield block
+
     async def _build(self, key, files, read, job):
         path = self.path(key)
         partial = path.with_suffix(".part")
@@ -126,21 +175,13 @@ class PlaylistArchives:
             with ZipFile(partial, "w", allowZip64=True) as archive:
                 os.chmod(partial, 0o600)
                 for index, item in enumerate(files, 1):
-                    done = 0
                     with archive.open(
                         entry_name(index, item["name"]), "w", force_zip64=True
                     ) as entry:
-                        async with aclosing(read(item)) as source:
-                            while True:
-                                try:
-                                    chunk = await asyncio.wait_for(anext(source), self.READ_TIMEOUT)
-                                except StopAsyncIteration:
-                                    break
-                                if (
-                                    done + len(chunk) > item["size"]
-                                    or time.time() >= job["expires"]
-                                ):
-                                    raise OSError("ZIP source changed or preparation expired")
+                        async with aclosing(self._file_chunks(item, read)) as chunks:
+                            async for chunk in chunks:
+                                if time.time() >= job["expires"]:
+                                    raise OSError("ZIP preparation expired")
                                 writing = asyncio.create_task(asyncio.to_thread(entry.write, chunk))
                                 try:
                                     await asyncio.shield(writing)
@@ -149,10 +190,7 @@ class PlaylistArchives:
                                         writing
                                     )  # Close the ZIP only after its disk writer has stopped.
                                     raise
-                                done += len(chunk)
                                 job["bytes"] += len(chunk)
-                    if done != item["size"]:
-                        raise OSError("ZIP source ended early")
             size = partial.stat().st_size
             if size > job["reservation"]:
                 raise OSError("ZIP exceeded its reservation")

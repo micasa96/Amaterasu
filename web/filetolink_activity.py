@@ -84,17 +84,19 @@ class TransferTotals:
                     previous = done
                     done += len(chunk)
                     self.values["bytes"] += len(chunk)
-                    if kind:
+                    if kind and length is not None:
                         self.delivered(key, start + previous, start + done, size, kind)
                     yield chunk
-            if done < length:
+            if length is not None and done < length:
                 raise OSError("Transfer ended before Content-Length")
+            if kind == "zip" and length is None:
+                self.values["zip_downloads"] += 1
             outcome = "completed"
         except Exception:
             outcome = "failed"
             raise
         finally:
-            if outcome == "incomplete" and done >= length:
+            if outcome == "incomplete" and length is not None and done >= length:
                 outcome = "completed"
             self.values[outcome] += 1
             self.active -= 1

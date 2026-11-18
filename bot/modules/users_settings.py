@@ -17,7 +17,7 @@ from pyrogram.handlers import MessageHandler
 from web.security import make_signed_token
 
 from .. import auth_chats, excluded_extensions, sudo_users, user_data
-from ..core.config_manager import Config
+from ..core.config_manager import BinConfig, Config
 from ..core.tg_client import TgClient
 from ..helper.ext_utils.bot_utils import (
     get_web_secret,
@@ -1696,6 +1696,8 @@ async def _handle_enc_create(client, message, rfunc):
         if "name" not in pdata:
             raise Exception("Profile must have a 'name' field")
         pdata, profile_warnings = normalize_encode_profile(pdata)
+        if pdata.get("svtav1_variant") == "5fish" and not BinConfig.FFMPEG_5FISH_NAME:
+            raise ValueError("SVT-AV1 (5fish · Anime) requires an updated Amaterasu base image.")
         pid = uuid.uuid4().hex[:8]
         await database.save_encode_profile(user_id, pid, pdata)
         warning_text = (

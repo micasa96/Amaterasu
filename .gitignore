@@ -43,6 +43,7 @@ graphify-out/*
 .agent*
 AGENTS.md
 __pycache__/
+/rust-core/target/
 *.pyc
 # Per-deployment secrets (auto-generated on first boot)
 .amaterasu_secrets
@@ -62,6 +63,7 @@ tests/*
 !tests/test_filetolink_streaming.py
 !tests/test_filetolink_library.py
 !tests/player_runtime.test.cjs
+!tests/encode_profile_model.test.mjs
 !tests/test_adaptive_tg_stream.py
 !tests/test_hyperdl_routing.py
 !tests/test_hypertg_efficiency.py
@@ -72,6 +74,9 @@ tests/*
 !tests/test_update_safety.py
 !tests/test_multi_leech_summary.py
 !tests/test_google_drive_index_folders.py
+!tests/test_drive_categories.py
+!tests/test_go_bridge.py
+!tests/test_rust_bridge.py
 !tests/test_direct_listener_parallel.py
 !tests/test_http_client_pooling.py
 !tests/test_download_user_agent.py
@@ -89,3 +94,7 @@ tests/*
 !tests/test_podman_firewall.py
 !tests/test_shutdown_signals.py
 !tests/test_subtitle_cleaner.py
+
+# Web UI (Svelte) build output and dependencies
+web/ui/node_modules/
+web/static/dist/

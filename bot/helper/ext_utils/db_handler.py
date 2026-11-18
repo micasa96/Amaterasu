@@ -288,7 +288,9 @@ class DbManager:
                     "newRoot": {
                         "$mergeObjects": [
                             {"_id": user_id},
-                            data,
+                            # $literal stops Mongo from evaluating user values
+                            # such as "$5 Deals" as field paths/expressions.
+                            {"$literal": data},
                             {
                                 "$arrayToObject": {
                                     "$filter": {
@@ -757,7 +759,7 @@ class DbManager:
     def filetolink_collection(self, name):
         if self._return or self.db is None:
             raise RuntimeError("DATABASE_URL must be configured and reachable for the media library.")
-        if name not in {"library", "scans", "activity"}:
+        if name not in {"library", "scans", "activity", "streams"}:
             raise ValueError("Unknown FileToLink collection")
         return self.db[f"filetolink_{name}"][_part()]
 

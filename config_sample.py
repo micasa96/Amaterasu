@@ -258,7 +258,7 @@ DISABLE_SEARCH = False
 DISABLE_YTDLP = False
 CPU_LIMIT = 20
 THROTTLE_SERVICES = "auto"
-UPSTREAM_REPO = "https://github.com/Zan-getsu/Amaterasu"
+UPSTREAM_REPO = "https://github.com/its-niloy/Amaterasu"
 UPSTREAM_BRANCH = "main"
 # Opt-in. When enabled, updates only fast-forward a clean working tree.
 # Dirty, ahead, or diverged repositories are preserved and skipped.

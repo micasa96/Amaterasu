@@ -1,6 +1,6 @@
 from aiofiles.os import remove, path as aiopath
 from aiofiles import open as aiopen
-from asyncio import sleep, TimeoutError
+from asyncio import create_task, sleep, TimeoutError
 from contextlib import suppress
 from aioqbt.api import AddFormBuilder
 from aioqbt.exc import AQError
@@ -10,6 +10,7 @@ from .... import (
     task_dict,
     task_dict_lock,
     LOGGER,
+    qb_listener_lock,
     qb_torrents,
 )
 from ....core.config_manager import Config
@@ -43,6 +44,32 @@ def _get_hash_file(fpath):
         decodedDict = bdecode(f.read())
         return sha1(bencode(decodedDict[b'info'])).hexdigest()
 """
+
+_cleanup_tasks = set()
+
+
+async def _discard_torrents(tag, sweep=0):
+    """Delete every torrent carrying this task's tag (with its files) and
+    forget it. With ``sweep`` > 0, keep checking for that many seconds for a
+    torrent that qBittorrent registers late."""
+    waited = 0
+    while True:
+        with suppress(Exception):
+            if TorrentManager.qbittorrent is not None:
+                torrents = await TorrentManager.qbittorrent.torrents.info(tag=tag)
+                if torrents:
+                    await TorrentManager.qbittorrent.torrents.delete(
+                        [tor.hash for tor in torrents], True
+                    )
+                    with suppress(Exception):
+                        await TorrentManager.qbittorrent.torrents.delete_tags([tag])
+                    sweep = 0
+        async with qb_listener_lock:
+            qb_torrents.pop(tag, None)
+        if waited >= sweep:
+            return
+        await sleep(10)
+        waited += 10
 
 
 async def add_qb_torrent(listener, path, ratio, seed_time):
@@ -87,6 +114,12 @@ async def add_qb_torrent(listener, path, ratio, seed_time):
                     break
                 await sleep(1)
             else:
+                # The torrent can still appear later (slow magnet / busy
+                # qBittorrent); sweep for it so it does not keep downloading
+                # untracked after the task has been reported as failed.
+                task = create_task(_discard_torrents(f"{listener.mid}", sweep=300))
+                _cleanup_tasks.add(task)
+                task.add_done_callback(_cleanup_tasks.discard)
                 await listener.on_download_error(
                     "qBittorrent did not register the torrent within 60 seconds."
                 )
@@ -186,8 +219,7 @@ async def add_qb_torrent(listener, path, ratio, seed_time):
             await on_download_start(f"{listener.mid}")
             await TorrentManager.qbittorrent.torrents.start([ext_hash])
     except (ClientError, TimeoutError, Exception, AQError) as e:
-        if f"{listener.mid}" in qb_torrents:
-            del qb_torrents[f"{listener.mid}"]
+        await _discard_torrents(f"{listener.mid}")
         await listener.on_download_error(f"{e}")
     finally:
         if await aiopath.exists(listener.link):

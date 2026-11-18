@@ -174,7 +174,26 @@ async def add_jd_download(listener, path):
             remove_unknown = False
             name = ""
             error = ""
+            base_size = listener.size
+            own_prefix = f"{path.rstrip('/')}/"
+            first_pass = True
             while (time() - start_time) < 90:
+                if not first_pass:
+                    if not online_packages and corrupted_packages and error:
+                        await jdownloader.device.linkgrabber.remove_links(
+                            package_ids=corrupted_packages,
+                        )
+                        raise MYJDException(error)
+                    await sleep(1)
+                first_pass = False
+                # Rebuild per pass: the linkgrabber list is re-queried each
+                # time, so accumulating across passes duplicated package ids
+                # (re-joining forever with -j) and double-counted the size.
+                online_packages = []
+                corrupted_packages = []
+                error = ""
+                remove_unknown = False
+                listener.size = base_size
                 queued_downloads = await jdownloader.device.linkgrabber.query_packages(
                     [
                         {
@@ -188,13 +207,17 @@ async def add_jd_download(listener, path):
                     ],
                 )
 
-                if not online_packages and corrupted_packages and error:
-                    await jdownloader.device.linkgrabber.remove_links(
-                        package_ids=corrupted_packages,
-                    )
-                    raise MYJDException(error)
-
                 for pack in queued_downloads:
+                    save_to = pack.get("saveTo", "")
+                    # Only fresh packages (still in the default folder) or ones
+                    # already moved under this task's path belong to us; others
+                    # are another JD task's packages waiting in the linkgrabber.
+                    if not (
+                        save_to.startswith(default_path)
+                        or save_to == path.rstrip("/")
+                        or save_to.startswith(own_prefix)
+                    ):
+                        continue
                     if pack.get("onlineCount", 1) == 0:
                         error = f"{pack.get('name', '')}"
                         LOGGER.error(error)
